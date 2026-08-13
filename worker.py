@@ -8,8 +8,10 @@ import fcntl
 import tempfile
 import hashlib
 import gc
+import json
 
 from collections import defaultdict, OrderedDict
+from types import SimpleNamespace
 
 from telethon import TelegramClient, events
 from telethon.errors import ChatForwardsRestrictedError
@@ -44,7 +46,7 @@ WORKER_ID = os.getenv(
     "telegram-main"
 )
 
-WORKER_VERSION = "1.0.2"
+WORKER_VERSION = "1.1.0"
 
 HEARTBEAT_INTERVAL = 60
 CHAT_SYNC_INTERVAL = 15 * 60
@@ -60,6 +62,24 @@ MESSAGE_LINK_CACHE_TTL = 6 * 60 * 60
 FINGERPRINT_CACHE_MAX = 5000
 CACHE_MAINTENANCE_INTERVAL = 5 * 60
 MEDIA_SEND_CONCURRENCY = 1
+
+# Recuperação de updates perdidos. Além dos eventos em tempo real, o Worker
+# consulta somente os canais configurados como fonte. Isso cobre postagens
+# feitas pela própria conta em outra sessão (por exemplo, scheduled_sender)
+# que eventualmente não sejam entregues como update à sessão desta EC2.
+SOURCE_RECOVERY_INTERVAL = int(
+    os.getenv("TELEGRAM_SOURCE_RECOVERY_INTERVAL", "15")
+)
+SOURCE_RECOVERY_MAX_MESSAGES = int(
+    os.getenv("TELEGRAM_SOURCE_RECOVERY_MAX_MESSAGES", "500")
+)
+SOURCE_RECOVERY_STATE_FILE = os.getenv(
+    "TELEGRAM_SOURCE_RECOVERY_STATE_FILE",
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "source_recovery_state.json"
+    )
+)
 
 
 # ============================================================
@@ -3165,6 +3185,262 @@ async def deleted_message_handler(
 
 
 # ============================================================
+# RECUPERAÇÃO DE MENSAGENS PERDIDAS DA FONTE
+# ============================================================
+
+def load_source_recovery_state():
+    try:
+        with open(
+            SOURCE_RECOVERY_STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as state_file:
+            raw_state = json.load(state_file)
+
+        if not isinstance(raw_state, dict):
+            return {}
+
+        state = {}
+
+        for source_id, message_id in raw_state.items():
+            try:
+                state[str(source_id).strip()] = int(message_id)
+            except (TypeError, ValueError):
+                continue
+
+        return state
+
+    except FileNotFoundError:
+        return {}
+
+    except Exception as error:
+        print(
+            "[Recovery] Estado inválido. Iniciando novo:",
+            type(error).__name__,
+            str(error)
+        )
+        return {}
+
+
+def save_source_recovery_state(state):
+    state_directory = os.path.dirname(
+        os.path.abspath(SOURCE_RECOVERY_STATE_FILE)
+    )
+    os.makedirs(state_directory, exist_ok=True)
+
+    temporary_path = (
+        SOURCE_RECOVERY_STATE_FILE
+        + ".tmp"
+    )
+
+    with open(
+        temporary_path,
+        "w",
+        encoding="utf-8"
+    ) as state_file:
+        json.dump(
+            state,
+            state_file,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True
+        )
+        state_file.flush()
+        os.fsync(state_file.fileno())
+
+    os.replace(
+        temporary_path,
+        SOURCE_RECOVERY_STATE_FILE
+    )
+
+
+def active_source_ids(automations):
+    sources = []
+    seen = set()
+
+    for automation in automations:
+        source = automation.get("source_chat_id")
+
+        if source is None:
+            continue
+
+        source_text = str(source).strip()
+
+        if not source_text or source_text in seen:
+            continue
+
+        seen.add(source_text)
+        sources.append(source_text)
+
+    return sources
+
+
+def source_id_value(source_text):
+    if source_text.lstrip("-").isdigit():
+        return int(source_text)
+
+    return source_text
+
+
+async def recover_source_messages(
+    source_text,
+    last_message_id
+):
+    source_id = source_id_value(source_text)
+    source_entity = await resolve_destination_entity(
+        source_id
+    )
+
+    recovered_messages = []
+
+    async for message in client.iter_messages(
+        source_entity,
+        min_id=int(last_message_id),
+        limit=SOURCE_RECOVERY_MAX_MESSAGES
+    ):
+        recovered_messages.append(message)
+
+    if not recovered_messages:
+        return int(last_message_id)
+
+    # iter_messages retorna do mais novo para o mais antigo.
+    # Processamos na ordem original do canal.
+    recovered_messages.sort(
+        key=lambda item: int(item.id)
+    )
+
+    print(
+        "[Recovery] Mensagens recuperadas:",
+        len(recovered_messages),
+        "| fonte:",
+        source_text,
+        "| depois do ID:",
+        last_message_id
+    )
+
+    processed_albums = set()
+    newest_message_id = int(last_message_id)
+
+    for message in recovered_messages:
+        newest_message_id = max(
+            newest_message_id,
+            int(message.id)
+        )
+
+        grouped_id = getattr(
+            message,
+            "grouped_id",
+            None
+        )
+
+        if grouped_id:
+            if grouped_id in processed_albums:
+                continue
+
+            album_messages = [
+                album_message
+                for album_message in recovered_messages
+                if getattr(
+                    album_message,
+                    "grouped_id",
+                    None
+                ) == grouped_id
+            ]
+
+            processed_albums.add(grouped_id)
+
+            await album_handler(
+                SimpleNamespace(
+                    chat_id=source_id,
+                    grouped_id=grouped_id,
+                    messages=album_messages,
+                    out=any(
+                        bool(getattr(item, "out", False))
+                        for item in album_messages
+                    )
+                )
+            )
+
+            continue
+
+        await new_message_handler(
+            SimpleNamespace(
+                chat_id=source_id,
+                message=message,
+                out=bool(getattr(message, "out", False))
+            )
+        )
+
+    return newest_message_id
+
+
+async def source_recovery_loop():
+    state = load_source_recovery_state()
+
+    print(
+        "[Recovery] Ativo. Intervalo:",
+        SOURCE_RECOVERY_INTERVAL,
+        "segundos"
+    )
+
+    while True:
+        try:
+            automations = await load_automations()
+            sources = active_source_ids(automations)
+
+            for source_text in sources:
+                source_id = source_id_value(source_text)
+                source_entity = await resolve_destination_entity(
+                    source_id
+                )
+
+                # Na primeira execução, criamos um marco no último ID atual.
+                # Assim o deploy não repassa todo o histórico antigo do canal.
+                if source_text not in state:
+                    latest_messages = await client.get_messages(
+                        source_entity,
+                        limit=1
+                    )
+
+                    latest_id = (
+                        int(latest_messages[0].id)
+                        if latest_messages
+                        else 0
+                    )
+
+                    state[source_text] = latest_id
+                    save_source_recovery_state(state)
+
+                    print(
+                        "[Recovery] Fonte inicializada:",
+                        source_text,
+                        "| último ID:",
+                        latest_id
+                    )
+                    continue
+
+                newest_id = await recover_source_messages(
+                    source_text,
+                    state[source_text]
+                )
+
+                if newest_id > state[source_text]:
+                    state[source_text] = newest_id
+                    save_source_recovery_state(state)
+
+        except Exception as error:
+            print(
+                "[Recovery] ERRO:",
+                type(error).__name__,
+                str(error)
+            )
+
+        await asyncio.sleep(
+            max(5, SOURCE_RECOVERY_INTERVAL)
+        )
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -3288,6 +3564,10 @@ async def main():
         cache_maintenance_loop()
     )
 
+    asyncio.create_task(
+        source_recovery_loop()
+    )
+
     print(
         "================================="
     )
@@ -3326,6 +3606,10 @@ async def main():
 
     print(
         "[Worker] Own-message guard inteligente: ATIVO"
+    )
+
+    print(
+        "[Worker] Recuperação de fontes sem depender do Mac: ATIVO"
     )
 
     print(
