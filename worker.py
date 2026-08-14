@@ -46,7 +46,12 @@ WORKER_ID = os.getenv(
     "telegram-main"
 )
 
-WORKER_VERSION = "1.1.0"
+WORKER_VERSION = "1.2.0"
+
+# Diagnóstico dos updates recebidos do Telegram.
+# Deixe "1" durante os testes. Depois pode mudar para "0" no .env
+# se quiser reduzir a quantidade de logs.
+EVENT_DEBUG = os.getenv("TELEGRAM_EVENT_DEBUG", "1").strip() == "1"
 
 HEARTBEAT_INTERVAL = 60
 CHAT_SYNC_INTERVAL = 15 * 60
@@ -772,10 +777,22 @@ def debug_automations(
 async def get_matching_automations(
     source_id
 ):
+    """
+    Retorna todas as automações cuja origem é o chat do evento.
+
+    IMPORTANTE:
+    Antes o Worker simplesmente retornava [] quando o source_chat_id
+    não coincidia. Isso fazia parecer que o Telegram não tinha recebido
+    a mensagem. Agora o log mostra claramente o chat recebido e as
+    origens cadastradas no painel.
+    """
 
     automations = await load_automations()
 
+    source_id_text = str(source_id).strip()
     matches = []
+
+    configured_sources = []
 
     for automation in automations:
 
@@ -783,17 +800,42 @@ async def get_matching_automations(
             "source_chat_id"
         )
 
-        if not source:
+        if source is None:
             continue
 
-        if (
-            str(source).strip()
-            ==
-            str(source_id).strip()
-        ):
+        source_text = str(source).strip()
+
+        if not source_text:
+            continue
+
+        configured_sources.append(
+            source_text
+        )
+
+        if source_text == source_id_text:
 
             matches.append(
                 automation
+            )
+
+    if EVENT_DEBUG:
+
+        print(
+            "[Match] chat recebido:",
+            source_id_text,
+            "| automações encontradas:",
+            len(matches)
+        )
+
+        if not matches:
+
+            print(
+                "[Match] Nenhuma automação para este chat."
+            )
+
+            print(
+                "[Match] Origens configuradas:",
+                configured_sources
             )
 
     return matches
@@ -2284,44 +2326,150 @@ async def publish_single_message(
 # ============================================================
 
 @client.on(
-    events.NewMessage
+    events.NewMessage()
 )
 async def new_message_handler(
     event
 ):
+    """
+    Captura TODA mensagem nova entregue à sessão Telethon,
+    seja enviada pela própria conta ou por terceiros.
+
+    Não usamos incoming=True/outgoing=True aqui porque a origem
+    da automação é o CHAT, não o autor. Assim evitamos excluir
+    mensagens legítimas de terceiros ou postagens de canal.
+    """
 
     message = event.message
+    source_id = event.chat_id
 
-    # event.out também é True quando a própria conta conectada
-    # publica MANUALMENTE num canal de origem.
-    # Só ignoramos se esta mensagem foi criada pelo Worker.
-    if getattr(event, "out", False):
+    if source_id is None:
+
+        print(
+            "[Event] NewMessage sem chat_id. Ignorada."
+        )
+
+        return
+
+    if EVENT_DEBUG:
+
+        sender_id = getattr(
+            event,
+            "sender_id",
+            None
+        )
+
+        print(
+            "\n================ EVENTO TELEGRAM ================"
+        )
+
+        print(
+            "[Event] Tipo: NewMessage"
+        )
+
+        print(
+            "[Event] Chat ID:",
+            source_id
+        )
+
+        print(
+            "[Event] Sender ID:",
+            sender_id
+        )
+
+        print(
+            "[Event] Message ID:",
+            getattr(
+                message,
+                "id",
+                None
+            )
+        )
+
+        print(
+            "[Event] Outgoing:",
+            bool(
+                getattr(
+                    event,
+                    "out",
+                    False
+                )
+            )
+        )
+
+        print(
+            "[Event] Grouped ID:",
+            getattr(
+                message,
+                "grouped_id",
+                None
+            )
+        )
+
+        preview = (
+            getattr(
+                message,
+                "message",
+                ""
+            )
+            or ""
+        )
+
+        print(
+            "[Event] Texto:",
+            repr(
+                preview[:300]
+            )
+        )
+
+        print(
+            "=================================================="
+        )
+
+    # event.out=True também pode acontecer quando a própria
+    # conta conectada publica MANUALMENTE numa origem.
+    # Portanto NÃO descartamos todas as mensagens outgoing.
+    #
+    # Só descartamos mensagens que sabemos que foram criadas
+    # pelo próprio Worker em um destino, evitando cascata.
+    if getattr(
+        event,
+        "out",
+        False
+    ):
 
         if await is_self_published(
-            event.chat_id,
+            source_id,
             message.id
         ):
+
             print(
                 "[Self Published] Mensagem criada pelo Worker "
                 "ignorada para evitar cascata."
             )
+
             return
 
         print(
-            "[Own Message] Postagem manual da conta detectada. "
+            "[Own Message] Mensagem da própria conta detectada. "
             "Processando normalmente."
         )
 
-    # Álbum é tratado separadamente.
+    # Álbum é processado pelo events.Album.
     if getattr(
         message,
         "grouped_id",
         None
     ):
 
-        return
+        if EVENT_DEBUG:
 
-    source_id = event.chat_id
+            print(
+                "[Event] Mensagem pertence a álbum. "
+                "Aguardando Album handler."
+            )
+
+        return
 
     matches = (
         await get_matching_automations(
@@ -2332,9 +2480,26 @@ async def new_message_handler(
     if not matches:
         return
 
+    print(
+        "[NewMessage] Automação encontrada. "
+        "Iniciando processamento:",
+        source_id,
+        message.id
+    )
+
     for automation in matches:
 
         try:
+
+            print(
+                "[NewMessage] Executando automação:",
+                automation.get(
+                    "name"
+                )
+                or automation.get(
+                    "id"
+                )
+            )
 
             await publish_single_message(
                 message,
@@ -2356,7 +2521,7 @@ async def new_message_handler(
 # ============================================================
 
 @client.on(
-    events.Album
+    events.Album()
 )
 async def album_handler(
     event
@@ -2841,7 +3006,7 @@ async def album_handler(
 # ============================================================
 
 @client.on(
-    events.MessageEdited
+    events.MessageEdited()
 )
 async def edited_message_handler(
     event
@@ -3044,7 +3209,7 @@ async def edited_message_handler(
 # ============================================================
 
 @client.on(
-    events.MessageDeleted
+    events.MessageDeleted()
 )
 async def deleted_message_handler(
     event
@@ -3301,6 +3466,16 @@ async def recover_source_messages(
         recovered_messages.append(message)
 
     if not recovered_messages:
+
+        if EVENT_DEBUG:
+
+            print(
+                "[Recovery] Nenhuma mensagem nova | fonte:",
+                source_text,
+                "| depois do ID:",
+                last_message_id
+            )
+
         return int(last_message_id)
 
     # iter_messages retorna do mais novo para o mais antigo.
@@ -3574,6 +3749,15 @@ async def main():
 
     print(
         "[Worker] ONLINE"
+    )
+
+    print(
+        "[Worker] Event debug:",
+        "ATIVO" if EVENT_DEBUG else "DESATIVADO"
+    )
+
+    print(
+        "[Worker] Listener NewMessage universal: ATIVO"
     )
 
     print(
