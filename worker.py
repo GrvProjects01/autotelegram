@@ -18,14 +18,24 @@ from telethon.errors import ChatForwardsRestrictedError
 from telethon.tl.types import (
     Channel,
     Chat,
+    User,
+    MessageEntityBold,
+    MessageEntityItalic,
+    MessageEntityCode,
+    MessageEntityPre,
     MessageEntityTextUrl,
+    MessageEntityMentionName,
+    MessageEntityStrike,
+    MessageEntityUnderline,
+    MessageEntitySpoil,
+    MessageEntityCustomEmoji,
 )
 
 from dotenv import load_dotenv
 
 
 # ============================================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO DE AMBIENTE
 # ============================================================
 
 load_dotenv()
@@ -46,18 +56,18 @@ WORKER_ID = os.getenv(
     "telegram-main"
 )
 
-WORKER_VERSION = "1.2.0"
+WORKER_VERSION = "1.3.0"
 
-# Diagnóstico dos updates recebidos do Telegram.
-# Deixe "1" durante os testes. Depois pode mudar para "0" no .env
-# se quiser reduzir a quantidade de logs.
+# Diagnóstico refinado dos updates recebidos do Telegram.
+# 1 -> imprime chats/mensagens tratados
+# 2 -> imprime inclusive mensagens ignoradas
 EVENT_DEBUG = os.getenv("TELEGRAM_EVENT_DEBUG", "1").strip() == "1"
 
 HEARTBEAT_INTERVAL = 60
 CHAT_SYNC_INTERVAL = 15 * 60
 
 # ============================================================
-# AJUSTES DE PRODUÇÃO / MEMÓRIA
+# AJUSTES DE PRODUÇÃO / MEMÓRIA / RECOVER
 # ============================================================
 
 AUTOMATIONS_CACHE_TTL = 5
@@ -68,10 +78,6 @@ FINGERPRINT_CACHE_MAX = 5000
 CACHE_MAINTENANCE_INTERVAL = 5 * 60
 MEDIA_SEND_CONCURRENCY = 1
 
-# Recuperação de updates perdidos. Além dos eventos em tempo real, o Worker
-# consulta somente os canais configurados como fonte. Isso cobre postagens
-# feitas pela própria conta em outra sessão (por exemplo, scheduled_sender)
-# que eventualmente não sejam entregues como update à sessão desta EC2.
 SOURCE_RECOVERY_INTERVAL = int(
     os.getenv("TELEGRAM_SOURCE_RECOVERY_INTERVAL", "15")
 )
@@ -88,7 +94,7 @@ SOURCE_RECOVERY_STATE_FILE = os.getenv(
 
 
 # ============================================================
-# CLIENT
+# CLIENT TELETHON
 # ============================================================
 
 client = TelegramClient(
@@ -99,7 +105,7 @@ client = TelegramClient(
 
 
 # ============================================================
-# CACHE
+# CACHE LRU EM MEMÓRIA
 # ============================================================
 
 ENTITY_CACHE = OrderedDict()
@@ -221,15 +227,15 @@ async def cache_maintenance_loop():
             gc.collect()
 
             print(
-                "[Memory] Cache:",
-                f"entities={len(ENTITY_CACHE)}",
-                f"links={len(MESSAGE_LINK_CACHE)}",
-                f"fingerprints={len(FINGERPRINT_CACHE)}"
+                "[Memory] Limpeza concluída.",
+                f"Entities: {len(ENTITY_CACHE)} |",
+                f"Links: {len(MESSAGE_LINK_CACHE)} |",
+                f"Fingerprints: {len(FINGERPRINT_CACHE)}"
             )
 
         except Exception as error:
             print(
-                "[Memory] Erro na manutenção:",
+                "[Memory] Erro no ciclo de manutenção:",
                 type(error).__name__,
                 str(error)
             )
@@ -240,37 +246,17 @@ async def cache_maintenance_loop():
 
 
 # ============================================================
-# ANTI-DUPLICAÇÃO / LOCK
+# TRAVA ANTI-DUPLICAÇÃO E SISTEMA DE INSTÂNCIA ÚNICA
 # ============================================================
 
-# Impede duas execuções do mesmo Worker no mesmo Mac/servidor.
-# Isso é importante porque dois processos Telethon com a mesma
-# conta podem receber o mesmo update e publicar duas vezes.
 PROCESS_LOCK_HANDLE = None
-
-# Impede que dois handlers concorrentes do MESMO processo
-# processem a mesma mensagem/álbum ao mesmo tempo.
 PROCESSING_KEYS = set()
 PROCESSING_KEYS_LOCK = asyncio.Lock()
 
-# Cache temporal por fingerprint para impedir duplicações
-# que venham de updates diferentes do Telegram para o mesmo conteúdo.
 FINGERPRINT_CACHE = {}
 FINGERPRINT_CACHE_LOCK = asyncio.Lock()
-
-# Janela de deduplicação.
 FINGERPRINT_TTL_SECONDS = 30
 
-# ============================================================
-# MENSAGENS PUBLICADAS PELO PRÓPRIO WORKER
-# ============================================================
-#
-# A v1.0.0 ignorava TODO event.out. Isso também ignora uma
-# postagem legítima feita manualmente pela própria conta
-# conectada dentro de um canal que é origem de automação.
-#
-# Agora só ignoramos mensagens que o próprio Worker publicou
-# recentemente em um destino.
 SELF_PUBLISHED_CACHE = {}
 SELF_PUBLISHED_CACHE_LOCK = asyncio.Lock()
 SELF_PUBLISHED_TTL_SECONDS = 120
@@ -309,35 +295,27 @@ def acquire_process_lock():
         PROCESS_LOCK_HANDLE.flush()
 
         print(
-            "[Worker Lock] Processo exclusivo adquirido."
+            "[Worker Lock] Instância exclusiva iniciada com sucesso."
         )
 
     except BlockingIOError:
         raise RuntimeError(
-            "Já existe outro Worker rodando com esta sessão "
-            "neste computador/servidor. Feche o outro processo "
-            "antes de iniciar este Worker."
+            "Conflito de Instância: Já existe um Worker rodando para esta sessão "
+            "neste ambiente. Feche o outro processo antes de prosseguir."
         )
 
 
 async def claim_processing_key(key):
     async with PROCESSING_KEYS_LOCK:
-
         if key in PROCESSING_KEYS:
             return False
-
-        PROCESSING_KEYS.add(
-            key
-        )
-
+        PROCESSING_KEYS.add(key)
         return True
 
 
 async def release_processing_key(key):
     async with PROCESSING_KEYS_LOCK:
-        PROCESSING_KEYS.discard(
-            key
-        )
+        PROCESSING_KEYS.discard(key)
 
 
 def normalize_text_for_fingerprint(text):
@@ -500,40 +478,20 @@ async def is_self_published_album(chat_id, messages):
 
 
 # ============================================================
-# ENDPOINTS
+# ENDPOINTS REST BACKEND (LOVABLE)
 # ============================================================
 
-AUTOMATIONS_ENDPOINT = (
-    "/api/public/worker/automations"
-)
-
-LOGS_ENDPOINT = (
-    "/api/public/worker/logs"
-)
-
-HEARTBEAT_ENDPOINT = (
-    "/api/public/worker/heartbeat"
-)
-
-CHATS_SYNC_ENDPOINT = (
-    "/api/public/worker/chats/sync"
-)
-
-MESSAGE_LINK_UPSERT_ENDPOINT = (
-    "/api/public/worker/message-links/upsert"
-)
-
-MESSAGE_LINK_FIND_ENDPOINT = (
-    "/api/public/worker/message-links/find"
-)
-
-MESSAGE_LINK_REMOVE_ENDPOINT = (
-    "/api/public/worker/message-links/remove"
-)
+AUTOMATIONS_ENDPOINT = "/api/public/worker/automations"
+LOGS_ENDPOINT = "/api/public/worker/logs"
+HEARTBEAT_ENDPOINT = "/api/public/worker/heartbeat"
+CHATS_SYNC_ENDPOINT = "/api/public/worker/chats/sync"
+MESSAGE_LINK_UPSERT_ENDPOINT = "/api/public/worker/message-links/upsert"
+MESSAGE_LINK_FIND_ENDPOINT = "/api/public/worker/message-links/find"
+MESSAGE_LINK_REMOVE_ENDPOINT = "/api/public/worker/message-links/remove"
 
 
 # ============================================================
-# LOVABLE
+# COMUNICAÇÃO HTTP
 # ============================================================
 
 HTTP_CLIENT = None
@@ -572,55 +530,28 @@ async def close_http_client():
         await HTTP_CLIENT.aclose()
 
 
-
 async def lovable_request(
     path,
     method="GET",
     data=None
 ):
-
     headers = {
         "x-worker-secret": WORKER_SECRET,
         "Content-Type": "application/json"
     }
 
     url = f"{LOVABLE_API_URL}{path}"
-
     http = await get_http_client()
 
     try:
-
         if method == "POST":
-
-            response = await http.post(
-                url,
-                json=data,
-                headers=headers
-            )
-
+            response = await http.post(url, json=data, headers=headers)
         elif method == "PUT":
-
-            response = await http.put(
-                url,
-                json=data,
-                headers=headers
-            )
-
+            response = await http.put(url, json=data, headers=headers)
         elif method == "DELETE":
-
-            response = await http.request(
-                "DELETE",
-                url,
-                json=data,
-                headers=headers
-            )
-
+            response = await http.request("DELETE", url, json=data, headers=headers)
         else:
-
-            response = await http.get(
-                url,
-                headers=headers
-            )
+            response = await http.get(url, headers=headers)
 
         response.raise_for_status()
 
@@ -630,489 +561,210 @@ async def lovable_request(
         return response.json()
 
     except httpx.HTTPStatusError as error:
-
-        print(
-            f"[Lovable] HTTP "
-            f"{error.response.status_code}"
-        )
-
-        print(
-            "[Lovable] URL:",
-            url
-        )
-
+        print(f"[Lovable] HTTP {error.response.status_code} - URL: {url}")
         try:
-            print(
-                "[Lovable] Resposta:",
-                error.response.text
-            )
+            print("[Lovable] Resposta:", error.response.text)
         except Exception:
             pass
-
         raise
 
     except httpx.RequestError as error:
-
-        print(
-            "[Lovable] Erro de conexão:",
-            str(error)
-        )
-
+        print("[Lovable] Erro de rede/conexão:", str(error))
         raise
 
 
 # ============================================================
-# AUTOMAÇÕES
+# GESTÃO DE AUTOMAÇÕES
 # ============================================================
 
-async def load_automations(
-    force_refresh=False
-):
-
+async def load_automations(force_refresh=False):
     now = time.monotonic()
 
     if (
         not force_refresh
-        and
-        AUTOMATIONS_CACHE["expires_at"] > now
+        and AUTOMATIONS_CACHE["expires_at"] > now
     ):
         return AUTOMATIONS_CACHE["data"]
 
-    result = await lovable_request(
-        AUTOMATIONS_ENDPOINT
-    )
-
-    automations = result.get(
-        "automations",
-        []
-    ) or []
+    result = await lovable_request(AUTOMATIONS_ENDPOINT)
+    automations = result.get("automations", []) or []
 
     AUTOMATIONS_CACHE["data"] = automations
-    AUTOMATIONS_CACHE["expires_at"] = (
-        now
-        +
-        AUTOMATIONS_CACHE_TTL
-    )
+    AUTOMATIONS_CACHE["expires_at"] = now + AUTOMATIONS_CACHE_TTL
 
     return automations
 
 
-def debug_automations(
-    automations
-):
+def debug_automations(automations):
+    print("\n================ DIAGNÓSTICO DE AUTOMAÇÕES ================")
+    print("[DEBUG] Automações ativas no painel:", len(automations))
 
-    print(
-        "\n================ DEBUG AUTOMAÇÕES ================"
-    )
+    for index, automation in enumerate(automations, start=1):
+        replacements = automation.get("replacements", []) or []
+        blacklist = automation.get("blacklist", []) or []
 
-    print(
-        "[DEBUG] Automações recebidas:",
-        len(automations)
-    )
+        print(f"\n[DEBUG] Automação #{index}")
+        print("[DEBUG] ID:", automation.get("id"))
+        print("[DEBUG] Nome:", automation.get("name"))
+        print("[DEBUG] Chat Origem (Source):", automation.get("source_chat_id"))
+        print("[DEBUG] Chat Destino (Destination):", automation.get("destination_chat_id"))
+        print("[DEBUG] Substituições de texto:", len(replacements))
+        print("[DEBUG] Palavras bloqueadas (Blacklist):", len(blacklist))
 
-    for index, automation in enumerate(
-        automations,
-        start=1
-    ):
-
-        replacements = (
-            automation.get(
-                "replacements",
-                []
-            )
-            or []
-        )
-
-        blacklist = (
-            automation.get(
-                "blacklist",
-                []
-            )
-            or []
-        )
-
-        print(
-            f"\n[DEBUG] Automação #{index}"
-        )
-
-        print(
-            "[DEBUG] ID:",
-            automation.get("id")
-        )
-
-        print(
-            "[DEBUG] Nome:",
-            automation.get("name")
-        )
-
-        print(
-            "[DEBUG] Source:",
-            automation.get(
-                "source_chat_id"
-            )
-        )
-
-        print(
-            "[DEBUG] Destination:",
-            automation.get(
-                "destination_chat_id"
-            )
-        )
-
-        print(
-            "[DEBUG] Replacements:",
-            len(replacements)
-        )
-
-        print(
-            "[DEBUG] Blacklist:",
-            len(blacklist)
-        )
-
-    print(
-        "\n===================================================\n"
-    )
+    print("\n===========================================================\n")
 
 
-async def get_matching_automations(
-    source_id
-):
-    """
-    Retorna todas as automações cuja origem é o chat do evento.
-
-    IMPORTANTE:
-    Antes o Worker simplesmente retornava [] quando o source_chat_id
-    não coincidia. Isso fazia parecer que o Telegram não tinha recebido
-    a mensagem. Agora o log mostra claramente o chat recebido e as
-    origens cadastradas no painel.
-    """
-
+async def get_matching_automations(source_id):
     automations = await load_automations()
-
     source_id_text = str(source_id).strip()
     matches = []
-
     configured_sources = []
 
     for automation in automations:
-
-        source = automation.get(
-            "source_chat_id"
-        )
-
+        source = automation.get("source_chat_id")
         if source is None:
             continue
 
         source_text = str(source).strip()
-
         if not source_text:
             continue
 
-        configured_sources.append(
-            source_text
-        )
+        configured_sources.append(source_text)
 
         if source_text == source_id_text:
-
-            matches.append(
-                automation
-            )
+            matches.append(automation)
 
     if EVENT_DEBUG:
-
-        print(
-            "[Match] chat recebido:",
-            source_id_text,
-            "| automações encontradas:",
-            len(matches)
-        )
-
+        print(f"[Match] Chat evento: {source_id_text} | Automações localizadas: {len(matches)}")
         if not matches:
-
-            print(
-                "[Match] Nenhuma automação para este chat."
-            )
-
-            print(
-                "[Match] Origens configuradas:",
-                configured_sources
-            )
+            print("[Match] Sem automação. Origens mapeadas pelo backend:", configured_sources)
 
     return matches
 
 
 # ============================================================
-# HEARTBEAT
+# HEARTBEAT DO WORKER
 # ============================================================
 
 async def send_heartbeat():
-
     me = await client.get_me()
-
-    display_name = (
-        f"{me.first_name or ''} "
-        f"{me.last_name or ''}"
-    ).strip()
+    display_name = f"{me.first_name or ''} {me.last_name or ''}".strip()
 
     payload = {
-
-        "worker_id":
-            WORKER_ID,
-
-        "telegram_user_id":
-            str(me.id),
-
-        "telegram_display_name":
-            display_name,
-
-        "telegram_username":
-            me.username,
-
-        "status":
-            "online",
-
-        "version":
-            WORKER_VERSION
+        "worker_id": WORKER_ID,
+        "telegram_user_id": str(me.id),
+        "telegram_display_name": display_name,
+        "telegram_username": me.username,
+        "status": "online",
+        "version": WORKER_VERSION
     }
 
-    response = await lovable_request(
-        HEARTBEAT_ENDPOINT,
-        "POST",
-        payload
-    )
+    response = await lovable_request(HEARTBEAT_ENDPOINT, "POST", payload)
+    print("[Heartbeat] Status enviado com sucesso.")
 
-    print(
-        "[Heartbeat] enviado."
-    )
-
-    if isinstance(
-        response,
-        dict
-    ):
-
-        account_id = response.get(
-            "telegram_account_id"
-        )
-
+    if isinstance(response, dict):
+        account_id = response.get("telegram_account_id")
         if account_id:
-
-            print(
-                "[Heartbeat] Conta Lovable:",
-                account_id
-            )
+            print("[Heartbeat] Conta associada no Lovable:", account_id)
 
     return response
 
 
 async def heartbeat_loop():
-
     while True:
-
         try:
-
             await send_heartbeat()
-
         except Exception as error:
+            print("[Heartbeat] Falha na sincronização de presença:", type(error).__name__, str(error))
 
-            print(
-                "[Heartbeat] erro:",
-                type(error).__name__,
-                str(error)
-            )
-
-        await asyncio.sleep(
-            HEARTBEAT_INTERVAL
-        )
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
 # ============================================================
-# CHATS / ENTIDADES
+# CHATS E RESOLUÇÃO DE ENTIDADES
 # ============================================================
 
-def get_chat_type(
-    entity
-):
-
-    if isinstance(
-        entity,
-        Channel
-    ):
-
-        if getattr(
-            entity,
-            "megagroup",
-            False
-        ):
-
+def get_chat_type(entity):
+    if isinstance(entity, Channel):
+        if getattr(entity, "megagroup", False):
             return "supergroup"
-
         return "channel"
 
-    if isinstance(
-        entity,
-        Chat
-    ):
-
+    if isinstance(entity, Chat):
         return "group"
 
     return None
 
 
 async def warm_entity_cache():
-
-    print(
-        "[Entities] Carregando entidades..."
-    )
-
+    print("[Entities] Inicializando cache de diálogos...")
     count = 0
 
     async for dialog in client.iter_dialogs():
-
-        entity_cache_set(
-            str(dialog.id),
-            dialog.input_entity
-        )
-
+        entity_cache_set(str(dialog.id), dialog.input_entity)
         count += 1
 
-    print(
-        f"[Entities] {count} entidades carregadas."
-    )
+    print(f"[Entities] {count} entidades mapeadas com sucesso.")
 
 
-async def resolve_destination_entity(
-    destination_chat_id
-):
-
-    destination_str = str(
-        destination_chat_id
-    ).strip()
-
-    cached = entity_cache_get(
-        destination_str
-    )
+async def resolve_destination_entity(destination_chat_id):
+    destination_str = str(destination_chat_id).strip()
+    cached = entity_cache_get(destination_str)
 
     if cached is not None:
-
         return cached
 
     try:
-
-        entity = await client.get_input_entity(
-            int(destination_str)
-        )
-
-        entity_cache_set(
-            destination_str,
-            entity
-        )
-
+        entity = await client.get_input_entity(int(destination_str))
+        entity_cache_set(destination_str, entity)
         return entity
-
     except Exception:
         pass
 
     async for dialog in client.iter_dialogs():
-
-        dialog_id = str(
-            dialog.id
-        )
-
-        entity_cache_set(
-            dialog_id,
-            dialog.input_entity
-        )
+        dialog_id = str(dialog.id)
+        entity_cache_set(dialog_id, dialog.input_entity)
 
         if dialog_id == destination_str:
-
             return dialog.input_entity
 
-    raise ValueError(
-        "Não foi possível resolver o chat "
-        f"{destination_str}"
-    )
+    raise ValueError(f"Não foi possível localizar o chat de destino: {destination_str}")
 
 
 async def sync_telegram_chats():
-
-    print(
-        "[Chats] Sincronizando..."
-    )
-
+    print("[Chats] Sincronizando catálogo de canais com a API...")
     me = await client.get_me()
-
     chats = []
 
     async for dialog in client.iter_dialogs():
-
         entity = dialog.entity
+        entity_cache_set(str(dialog.id), dialog.input_entity)
 
-        entity_cache_set(
-            str(dialog.id),
-            dialog.input_entity
-        )
-
-        chat_type = get_chat_type(
-            entity
-        )
-
+        chat_type = get_chat_type(entity)
         if not chat_type:
             continue
 
-        username = getattr(
-            entity,
-            "username",
-            None
-        )
-
-        title = (
-            dialog.name
-            or getattr(
-                entity,
-                "title",
-                None
-            )
-            or "Sem nome"
-        )
+        username = getattr(entity, "username", None)
+        title = dialog.name or getattr(entity, "title", None) or "Sem título"
 
         chats.append({
-
-            "telegram_chat_id":
-                str(dialog.id),
-
-            "title":
-                title,
-
-            "username":
-                username,
-
-            "type":
-                chat_type,
-
-            "is_private":
-                not bool(username)
+            "telegram_chat_id": str(dialog.id),
+            "title": title,
+            "username": username,
+            "type": chat_type,
+            "is_private": not bool(username)
         })
 
     response = await lovable_request(
         CHATS_SYNC_ENDPOINT,
         "POST",
         {
-            "telegram_user_id":
-                str(me.id),
-
-            "chats":
-                chats
+            "telegram_user_id": str(me.id),
+            "chats": chats
         }
     )
 
-    print(
-        "[Chats] Sincronizados:",
-        response.get(
-            "synced",
-            len(chats)
-        )
-    )
-
+    print("[Chats] Canais sincronizados com sucesso:", response.get("synced", len(chats)))
     chats.clear()
     gc.collect()
 
@@ -1120,41 +772,21 @@ async def sync_telegram_chats():
 
 
 async def chat_sync_loop():
-
     while True:
-
         try:
-
             await sync_telegram_chats()
-
         except Exception as error:
+            print("[Chats] Erro no ciclo de sincronização:", type(error).__name__, str(error))
 
-            print(
-                "[Chats] erro:",
-                type(error).__name__,
-                str(error)
-            )
-
-        await asyncio.sleep(
-            CHAT_SYNC_INTERVAL
-        )
+        await asyncio.sleep(CHAT_SYNC_INTERVAL)
 
 
 # ============================================================
-# MESSAGE LINKS
+# PERSISTÊNCIA DE LINKS (ORIGEM <-> DESTINO)
 # ============================================================
 
-def message_link_key(
-    source_chat_id,
-    source_message_id,
-    automation_id
-):
-
-    return (
-        f"{source_chat_id}:"
-        f"{source_message_id}:"
-        f"{automation_id}"
-    )
+def message_link_key(source_chat_id, source_message_id, automation_id):
+    return f"{source_chat_id}:{source_message_id}:{automation_id}"
 
 
 async def save_message_link(
@@ -1165,275 +797,108 @@ async def save_message_link(
     destination_message_id,
     source_grouped_id=None
 ):
-
     link = {
-
-        "automation_id":
-            automation_id,
-
-        "source_chat_id":
-            str(source_chat_id),
-
-        "source_message_id":
-            int(source_message_id),
-
-        "source_grouped_id":
-            (
-                str(source_grouped_id)
-                if source_grouped_id
-                else None
-            ),
-
-        "destination_chat_id":
-            str(destination_chat_id),
-
-        "destination_message_id":
-            int(destination_message_id)
+        "automation_id": automation_id,
+        "source_chat_id": str(source_chat_id),
+        "source_message_id": int(source_message_id),
+        "source_grouped_id": str(source_grouped_id) if source_grouped_id else None,
+        "destination_chat_id": str(destination_chat_id),
+        "destination_message_id": int(destination_message_id)
     }
 
-    key = message_link_key(
-        source_chat_id,
-        source_message_id,
-        automation_id
-    )
+    key = message_link_key(source_chat_id, source_message_id, automation_id)
+    message_link_cache_set(key, [link])
 
-    message_link_cache_set(
-        key,
-        [link]
-    )
-
-    print(
-        "[Link] Registrado localmente:",
-        source_message_id,
-        "→",
-        destination_message_id
-    )
+    print(f"[Link] Vinculado localmente: {source_message_id} -> {destination_message_id}")
 
     try:
-
-        await lovable_request(
-            MESSAGE_LINK_UPSERT_ENDPOINT,
-            "POST",
-            link
-        )
-
-        print(
-            "[Link] Persistido no Lovable."
-        )
-
+        await lovable_request(MESSAGE_LINK_UPSERT_ENDPOINT, "POST", link)
+        print("[Link] Persistido na API Lovable.")
     except Exception as error:
-
-        print(
-            "[Link] Persistência remota falhou, "
-            "cache local continua ativo:",
-            type(error).__name__
-        )
+        print("[Link] Erro ao persistir remoto (cache ativo):", type(error).__name__)
 
 
-async def find_message_links(
-    source_chat_id,
-    source_message_id,
-    automation_id=None
-):
-
+async def find_message_links(source_chat_id, source_message_id, automation_id=None):
     local_links = []
 
     if automation_id:
-
-        key = message_link_key(
-            source_chat_id,
-            source_message_id,
-            automation_id
-        )
-
-        local_links = (
-            message_link_cache_get(
-                key
-            )
-            or []
-        )
-
+        key = message_link_key(source_chat_id, source_message_id, automation_id)
+        local_links = message_link_cache_get(key) or []
     else:
-
-        suffix = (
-            f":{source_message_id}:"
-        )
-
+        suffix = f":{source_message_id}:"
         now = time.monotonic()
 
-        for key, item in list(
-            MESSAGE_LINK_CACHE.items()
-        ):
-
-            if item.get(
-                "expires_at",
-                0
-            ) <= now:
-                MESSAGE_LINK_CACHE.pop(
-                    key,
-                    None
-                )
+        for key, item in list(MESSAGE_LINK_CACHE.items()):
+            if item.get("expires_at", 0) <= now:
+                MESSAGE_LINK_CACHE.pop(key, None)
                 continue
 
-            if (
-                key.startswith(
-                    f"{source_chat_id}:"
-                )
-                and suffix in key
-            ):
-
-                local_links.extend(
-                    item.get(
-                        "links",
-                        []
-                    )
-                    or []
-                )
+            if key.startswith(f"{source_chat_id}:") and suffix in key:
+                local_links.extend(item.get("links", []) or [])
 
     if local_links:
-
         return local_links
 
     payload = {
-
-        "source_chat_id":
-            str(source_chat_id),
-
-        "source_message_id":
-            int(source_message_id)
+        "source_chat_id": str(source_chat_id),
+        "source_message_id": int(source_message_id)
     }
 
     if automation_id:
-
-        payload[
-            "automation_id"
-        ] = automation_id
+        payload["automation_id"] = automation_id
 
     try:
-
-        response = await lovable_request(
-            MESSAGE_LINK_FIND_ENDPOINT,
-            "POST",
-            payload
-        )
-
-        links = (
-            response.get(
-                "links",
-                []
-            )
-            or []
-        )
+        response = await lovable_request(MESSAGE_LINK_FIND_ENDPOINT, "POST", payload)
+        links = response.get("links", []) or []
 
         for link in links:
-
             key = message_link_key(
                 link["source_chat_id"],
                 link["source_message_id"],
                 link["automation_id"]
             )
-
-            message_link_cache_set(
-                key,
-                [link]
-            )
+            message_link_cache_set(key, [link])
 
         return links
-
     except Exception as error:
-
-        print(
-            "[Link] Busca remota falhou:",
-            type(error).__name__
-        )
-
+        print("[Link] Falha na busca remota:", type(error).__name__)
         return []
 
 
-async def remove_message_links(
-    source_chat_id,
-    source_message_id,
-    automation_id=None
-):
-
+async def remove_message_links(source_chat_id, source_message_id, automation_id=None):
     keys_to_remove = []
 
-    for key in (
-        MESSAGE_LINK_CACHE.keys()
-    ):
-
-        prefix = (
-            f"{source_chat_id}:"
-            f"{source_message_id}:"
-        )
-
-        if key.startswith(
-            prefix
-        ):
-
-            if (
-                automation_id is None
-                or
-                key.endswith(
-                    f":{automation_id}"
-                )
-            ):
-
-                keys_to_remove.append(
-                    key
-                )
+    for key in MESSAGE_LINK_CACHE.keys():
+        prefix = f"{source_chat_id}:{source_message_id}:"
+        if key.startswith(prefix):
+            if automation_id is None or key.endswith(f":{automation_id}"):
+                keys_to_remove.append(key)
 
     for key in keys_to_remove:
-
-        MESSAGE_LINK_CACHE.pop(
-            key,
-            None
-        )
+        MESSAGE_LINK_CACHE.pop(key, None)
 
     payload = {
-
-        "source_chat_id":
-            str(source_chat_id),
-
-        "source_message_id":
-            int(source_message_id)
+        "source_chat_id": str(source_chat_id),
+        "source_message_id": int(source_message_id)
     }
 
     if automation_id:
-
-        payload[
-            "automation_id"
-        ] = automation_id
+        payload["automation_id"] = automation_id
 
     try:
-
-        await lovable_request(
-            MESSAGE_LINK_REMOVE_ENDPOINT,
-            "POST",
-            payload
-        )
-
+        await lovable_request(MESSAGE_LINK_REMOVE_ENDPOINT, "POST", payload)
     except Exception:
-
         pass
 
 
 # ============================================================
-# TEXTO RICO
+# PARSER DE ENTIDADES E FORMATAÇÃO DE TEXTO
 # ============================================================
 
-def utf16_length(
-    text
-):
-
+def utf16_length(text):
     if not text:
         return 0
-
-    return len(
-        text.encode(
-            "utf-16-le"
-        )
-    ) // 2
+    return len(text.encode("utf-16-le")) // 2
 
 
 def normalize_replacement_rule(rule):
@@ -1451,14 +916,7 @@ def normalize_replacement_rule(rule):
     )
 
     replacement = None
-    for key in (
-        "replacement",
-        "replace",
-        "target",
-        "to",
-        "new_value",
-        "destination"
-    ):
+    for key in ("replacement", "replace", "target", "to", "new_value", "destination"):
         if key in rule:
             replacement = rule.get(key)
             break
@@ -1495,55 +953,25 @@ def get_active_replacements(automation):
     raw_replacements = automation.get("replacements", []) or []
     normalized = []
 
-    for index, rule in enumerate(raw_replacements, start=1):
+    for rule in raw_replacements:
         normalized_rule = normalize_replacement_rule(rule)
+        if normalized_rule is not None:
+            normalized.append(normalized_rule)
 
-        if normalized_rule is None:
-            print(
-                f"[Replace] Regra #{index} ignorada. Campos recebidos: "
-                f"{list(rule.keys()) if isinstance(rule, dict) else type(rule).__name__}"
-            )
-            continue
-
-        normalized.append(normalized_rule)
-
-    normalized = sorted(
-        normalized,
-        key=lambda x: x.get("priority", 0)
-    )
-
-    if raw_replacements:
-        print(
-            "[Replace] Regras recebidas:",
-            len(raw_replacements),
-            "| válidas:",
-            len(normalized),
-        )
-
-        for index, rule in enumerate(normalized, start=1):
-            print(
-                f"[Replace] #{index}: "
-                f"{rule['match']!r} -> {rule['replacement']!r} "
-                f"| case_sensitive={rule['case_sensitive']}"
-            )
-
-    return normalized
+    return sorted(normalized, key=lambda x: x.get("priority", 0))
 
 
-def replace_value(value, replacements):
-    if not value:
-        return value
+def apply_replacements(text, replacements):
+    if not text or not replacements:
+        return text
 
-    result = value
-
+    result = text
     for rule in replacements:
         find = rule.get("match", "")
         replacement = rule.get("replacement", "")
 
         if not find:
             continue
-
-        before = result
 
         if rule.get("case_sensitive", False):
             result = result.replace(find, replacement)
@@ -1552,2278 +980,472 @@ def replace_value(value, replacements):
                 re.escape(find),
                 lambda _: replacement,
                 result,
-                flags=re.IGNORECASE,
-            )
-
-        if result != before:
-            print(
-                "[Replace] Aplicado em URL/valor:",
-                repr(find),
-                "→",
-                repr(replacement),
+                flags=re.IGNORECASE
             )
 
     return result
 
 
-def find_replacement_occurrences(text, replacements):
-    occurrences = []
-    working_text = text
-
-    for rule in replacements:
-        find = rule.get("match", "")
-        replacement = rule.get("replacement", "")
-
-        if not find:
-            continue
-
-        flags = 0 if rule.get("case_sensitive", False) else re.IGNORECASE
-        pattern = re.compile(re.escape(find), flags)
-        applied_count = 0
-
-        while True:
-            match = pattern.search(working_text)
-
-            if not match:
-                break
-
-            start = match.start()
-            end = match.end()
-            before = working_text[:start]
-            old_value = working_text[start:end]
-
-            occurrences.append({
-                "start": utf16_length(before),
-                "old_length": utf16_length(old_value),
-                "new_length": utf16_length(replacement),
-            })
-
-            working_text = (
-                working_text[:start]
-                + replacement
-                + working_text[end:]
-            )
-
-            applied_count += 1
-
-        if applied_count:
-            print(
-                "[Replace] Texto alterado:",
-                repr(find),
-                "→",
-                repr(replacement),
-                f"| ocorrências={applied_count}",
-            )
-
-    return working_text, occurrences
-
-
-def adjust_entities_for_replacements(
-    entities,
-    occurrences
-):
-
-    if not entities:
-        return []
-
-    result = copy.deepcopy(
-        entities
-    )
-
-    for occurrence in occurrences:
-
-        replace_start = (
-            occurrence["start"]
-        )
-
-        old_length = (
-            occurrence[
-                "old_length"
-            ]
-        )
-
-        new_length = (
-            occurrence[
-                "new_length"
-            ]
-        )
-
-        replace_end = (
-            replace_start
-            +
-            old_length
-        )
-
-        delta = (
-            new_length
-            -
-            old_length
-        )
-
-        for entity in result:
-
-            entity_start = (
-                entity.offset
-            )
-
-            entity_end = (
-                entity.offset
-                +
-                entity.length
-            )
-
-            if (
-                replace_end
-                <= entity_start
-            ):
-
-                entity.offset += delta
-
-            elif (
-                replace_start
-                < entity_end
-                and
-                replace_end
-                > entity_start
-            ):
-
-                entity.length = max(
-                    0,
-                    entity.length
-                    +
-                    delta
-                )
-
-    return [
-        entity
-        for entity in result
-
-        if getattr(
-            entity,
-            "length",
-            0
-        ) > 0
-    ]
-
-
-def process_hidden_urls(
-    entities,
-    replacements
-):
-
-    result = copy.deepcopy(
-        entities
-        or []
-    )
-
-    for entity in result:
-
-        if isinstance(
-            entity,
-            MessageEntityTextUrl
-        ):
-
-            entity.url = (
-                replace_value(
-                    entity.url or "",
-                    replacements
-                )
-            )
-
-    return result
-
-
-def check_blacklist(
-    text,
-    entities,
-    automation
-):
-
-    blacklist = (
-        automation.get(
-            "blacklist",
-            []
-        )
-        or []
-    )
-
-    hidden_urls = []
-
-    for entity in (
-        entities or []
-    ):
-
-        if isinstance(
-            entity,
-            MessageEntityTextUrl
-        ):
-
-            if entity.url:
-
-                hidden_urls.append(
-                    entity.url
-                )
-
-    content = (
-        (text or "")
-        +
-        "\n"
-        +
-        "\n".join(
-            hidden_urls
-        )
-    )
-
-    for rule in blacklist:
-
-        if not rule.get(
-            "enabled",
-            True
-        ):
-
-            continue
-
-        term = rule.get(
-            "term",
-            ""
-        )
-
-        if not term:
-            continue
-
-        match_type = rule.get(
-            "match_type",
-            "contains"
-        )
-
-        detected = False
-
-        if match_type == "contains":
-
-            detected = (
-                term.lower()
-                in
-                content.lower()
-            )
-
-        elif match_type == "exact":
-
-            detected = (
-                content.lower().strip()
-                ==
-                term.lower().strip()
-            )
-
-        elif match_type == "regex":
-
-            try:
-
-                detected = bool(
-                    re.search(
-                        term,
-                        content,
-                        flags=re.IGNORECASE
-                    )
-                )
-
-            except re.error:
-
-                continue
-
-        if (
-            detected
-            and
-            rule.get(
-                "action",
-                "block"
-            )
-            ==
-            "block"
-        ):
-
-            return True
-
+def is_blacklisted(text, blacklist):
+    if not text or not blacklist:
+        return False
+
+    for word in blacklist:
+        if isinstance(word, str) and word.strip():
+            if re.search(re.escape(word.strip()), text, flags=re.IGNORECASE):
+                return True
     return False
 
 
-def process_rich_text(
-    text,
-    entities,
-    automation
-):
-
-    text = text or ""
-
-    entities = copy.deepcopy(
-        entities
-        or []
-    )
-
-    if check_blacklist(
-        text,
-        entities,
-        automation
-    ):
-
-        return None, []
-
-    replacements = (
-        get_active_replacements(
-            automation
-        )
-    )
-
-    entities = process_hidden_urls(
-        entities,
-        replacements
-    )
-
-    (
-        processed_text,
-        occurrences
-    ) = find_replacement_occurrences(
-        text,
-        replacements
-    )
-
-    if replacements:
-        if processed_text != text:
-            print(
-                "[Replace] Resultado alterado com sucesso."
-            )
-        else:
-            print(
-                "[Replace] Nenhuma regra encontrou correspondência "
-                "no texto visível."
-            )
-
-    processed_entities = (
-        adjust_entities_for_replacements(
-            entities,
-            occurrences
-        )
-    )
-
-    return (
-        processed_text,
-        processed_entities
-    )
-
-
 # ============================================================
-# LOGS
+# PROCESSAMENTO DE MENSAGENS E ÁLBUNS (COM FALLBACK DE RESTRIÇÃO)
 # ============================================================
 
-async def send_log(
-    automation_id,
-    source_message_id,
-    status,
-    original_text="",
-    processed_text="",
-    destination_message_id=None,
-    blocked_reason=None,
-    error_message=None
-):
-
-    payload = {
-
-        "automation_id":
-            automation_id,
-
-        # O endpoint do Lovable espera STRING.
-        "source_message_id":
-            (
-                str(source_message_id)
-                if source_message_id is not None
-                else None
-            ),
-
-        # O endpoint do Lovable espera STRING ou null.
-        "destination_message_id":
-            (
-                str(destination_message_id)
-                if destination_message_id is not None
-                else None
-            ),
-
-        "original_text":
-            original_text,
-
-        "processed_text":
-            processed_text,
-
-        "status":
-            status,
-
-        "blocked_reason":
-            blocked_reason,
-
-        "error_message":
-            error_message
-    }
-
-    try:
-
-        await lovable_request(
-            LOGS_ENDPOINT,
-            "POST",
-            payload
-        )
-
-    except Exception as error:
-
-        print(
-            "[Logs] Falha:",
-            str(error)
-        )
-
-
-# ============================================================
-# PUBLICAR MENSAGEM NORMAL
-# ============================================================
-
-async def publish_single_message(
-    message,
-    source_id,
-    automation
-):
-
-    automation_id = automation["id"]
-
-    processing_key = (
-        f"single:"
-        f"{source_id}:"
-        f"{message.id}:"
-        f"{automation_id}"
-    )
-
-    claimed = await claim_processing_key(
-        processing_key
-    )
-
-    if not claimed:
-
-        print(
-            "[Duplicate] Mensagem já está sendo processada:",
-            message.id
-        )
-
-        return
-
-    fingerprint = build_message_fingerprint(
-        source_id=source_id,
-        automation_id=automation_id,
-        message=message
-    )
-
-    fingerprint_claimed = await claim_fingerprint(fingerprint)
-
-    if not fingerprint_claimed:
-        print(
-            "[Duplicate Guard] Fingerprint repetido ignorado:",
-            fingerprint[:12],
-            "| message_id:",
-            message.id
-        )
-        await release_processing_key(processing_key)
-        return
-
-    started_at = time.monotonic()
-
-    try:
-
-        # ----------------------------------------------------
-        # IDEMPOTÊNCIA
-        #
-        # Se já existe vínculo source -> destination,
-        # esta mensagem já foi publicada antes.
-        # ----------------------------------------------------
-
-        existing_links = await find_message_links(
-
-            source_chat_id=
-                source_id,
-
-            source_message_id=
-                message.id,
-
-            automation_id=
-                automation_id
-        )
-
-        if existing_links:
-
-            print(
-                "[Duplicate] Mensagem já publicada. Ignorando:",
-                message.id
-            )
-
-            return
-
-
-        original_text = (
-            message.message
-            or ""
-        )
-
-        (
-            processed_text,
-            processed_entities
-        ) = process_rich_text(
-
-            original_text,
-            message.entities or [],
-            automation
-        )
-
-        if processed_text is None:
-
-            print(
-                "[Blacklist] Bloqueada."
-            )
-
-            await send_log(
-
-                automation_id=
-                    automation_id,
-
-                source_message_id=
-                    message.id,
-
-                status="blocked",
-
-                original_text=
-                    original_text,
-
-                blocked_reason=
-                    "blacklist"
-            )
-
-            return
-
-
-        destination = automation.get(
-            "destination_chat_id"
-        )
-
-        if not destination:
-            return
-
-
-        if (
-            str(destination).strip()
-            ==
-            str(source_id).strip()
-        ):
-
-            return
-
-
-        destination_entity = (
-            await resolve_destination_entity(
-                destination
-            )
-        )
-
-
-        preserve_media = automation.get(
-            "preserve_media",
-            True
-        )
-
-        preserve_caption = automation.get(
-            "preserve_caption",
-            True
-        )
-
-        preserve_formatting = (
-            automation.get(
-                "preserve_formatting",
-                True
-            )
-        )
-
-        formatting_entities = (
-            processed_entities
-            if preserve_formatting
-            else []
-        )
-
+async def send_single_message_with_bypass(destination_entity, message, custom_text=None):
+    """
+    Tenta encaminhar a mensagem. Se o canal de origem proibir encaminhamento
+    (ChatForwardsRestrictedError), realiza o fallback baixando e reenviando a mídia/texto.
+    """
+    async with MEDIA_SEND_SEMAPHORE:
+        text_to_send = custom_text if custom_text is not None else message.message
 
         try:
-
-            # ------------------------------------------------
-            # MÍDIA
-            # ------------------------------------------------
-
-            if (
-                message.media
-                and
-                preserve_media
-            ):
-
-                print(
-                    "[Media] Iniciando envio:",
-                    message.id
-                )
-
-                async with MEDIA_SEND_SEMAPHORE:
-
-                    sent = await client.send_file(
-
-                        destination_entity,
-
-                        message.media,
-
-                        caption=(
-                            processed_text
-                            if preserve_caption
-                            else ""
-                        ),
-
-                        formatting_entities=(
-                            formatting_entities
-                            if preserve_caption
-                            else []
-                        )
-                    )
-
-
-            # ------------------------------------------------
-            # TEXTO
-            # ------------------------------------------------
-
+            # Tenta o encaminhamento nativo primeiro (preserva estilo original)
+            if custom_text is None:
+                sent = await client.forward_messages(destination_entity, message)
+                if isinstance(sent, list):
+                    return sent[0]
+                return sent
             else:
-
-                if not processed_text:
-                    return
-
-                sent = await client.send_message(
-
-                    destination_entity,
-
-                    processed_text,
-
-                    formatting_entities=
-                        formatting_entities
-                )
-
+                # Se o texto foi modificado, republica dependendo da existência de mídia
+                if message.media:
+                    temp_file = await client.download_media(message)
+                    try:
+                        sent = await client.send_file(
+                            destination_entity,
+                            temp_file,
+                            caption=text_to_send,
+                            formatting_entities=message.entities
+                        )
+                        return sent
+                    finally:
+                        if temp_file and os.path.exists(temp_file):
+                            os.remove(temp_file)
+                else:
+                    return await client.send_message(
+                        destination_entity,
+                        text_to_send,
+                        formatting_entities=message.entities
+                    )
 
         except ChatForwardsRestrictedError:
-
-            # IMPORTANTE:
-            # O Telegram marcou o chat de origem como protegido
-            # contra encaminhamento/cópia de mídia.
-            #
-            # Não tentamos baixar/reupar a mídia para contornar
-            # essa proteção. Também não fazemos retry, porque
-            # isso pode gerar processamento repetido/duplicado.
-
-            print(
-                "[Protected Chat] Telegram bloqueou o envio "
-                "desta mídia por proteção do canal de origem. "
-                "Mensagem ignorada sem retry."
-            )
-
-            await send_log(
-
-                automation_id=
-                    automation_id,
-
-                source_message_id=
-                    message.id,
-
-                status="error",
-
-                original_text=
-                    original_text,
-
-                processed_text=
-                    processed_text,
-
-                error_message=(
-                    "ChatForwardsRestrictedError: "
-                    "mídia protegida pelo canal de origem"
-                )
-            )
-
-            return
-
-
-        elapsed = (
-            time.monotonic()
-            -
-            started_at
-        )
-
-        print(
-            "[Publish] Publicada:",
-            message.id,
-            "→",
-            sent.id,
-            f"({elapsed:.2f}s)"
-        )
-
-        await remember_self_published(
-            destination,
-            sent.id
-        )
-
-
-        # ----------------------------------------------------
-        # PERSISTIR VÍNCULO ANTES DE ENCERRAR O HANDLER
-        # ----------------------------------------------------
-
-        await save_message_link(
-
-            automation_id=
-                automation_id,
-
-            source_chat_id=
-                source_id,
-
-            source_message_id=
-                message.id,
-
-            destination_chat_id=
-                destination,
-
-            destination_message_id=
-                sent.id
-        )
-
-
-        await send_log(
-
-            automation_id=
-                automation_id,
-
-            source_message_id=
-                message.id,
-
-            destination_message_id=
-                sent.id,
-
-            status="published",
-
-            original_text=
-                original_text,
-
-            processed_text=
-                processed_text
-        )
-
-
-    finally:
-
-        await release_processing_key(
-            processing_key
-        )
-
-
-# ============================================================
-# NOVA MENSAGEM
-# ============================================================
-
-@client.on(
-    events.NewMessage()
-)
-async def new_message_handler(
-    event
-):
-    """
-    Captura TODA mensagem nova entregue à sessão Telethon,
-    seja enviada pela própria conta ou por terceiros.
-
-    Não usamos incoming=True/outgoing=True aqui porque a origem
-    da automação é o CHAT, não o autor. Assim evitamos excluir
-    mensagens legítimas de terceiros ou postagens de canal.
-    """
-
-    message = event.message
-    source_id = event.chat_id
-
-    if source_id is None:
-
-        print(
-            "[Event] NewMessage sem chat_id. Ignorada."
-        )
-
-        return
-
-    if EVENT_DEBUG:
-
-        sender_id = getattr(
-            event,
-            "sender_id",
-            None
-        )
-
-        print(
-            "\n================ EVENTO TELEGRAM ================"
-        )
-
-        print(
-            "[Event] Tipo: NewMessage"
-        )
-
-        print(
-            "[Event] Chat ID:",
-            source_id
-        )
-
-        print(
-            "[Event] Sender ID:",
-            sender_id
-        )
-
-        print(
-            "[Event] Message ID:",
-            getattr(
-                message,
-                "id",
-                None
-            )
-        )
-
-        print(
-            "[Event] Outgoing:",
-            bool(
-                getattr(
-                    event,
-                    "out",
-                    False
-                )
-            )
-        )
-
-        print(
-            "[Event] Grouped ID:",
-            getattr(
-                message,
-                "grouped_id",
-                None
-            )
-        )
-
-        preview = (
-            getattr(
-                message,
-                "message",
-                ""
-            )
-            or ""
-        )
-
-        print(
-            "[Event] Texto:",
-            repr(
-                preview[:300]
-            )
-        )
-
-        print(
-            "=================================================="
-        )
-
-    # event.out=True também pode acontecer quando a própria
-    # conta conectada publica MANUALMENTE numa origem.
-    # Portanto NÃO descartamos todas as mensagens outgoing.
-    #
-    # Só descartamos mensagens que sabemos que foram criadas
-    # pelo próprio Worker em um destino, evitando cascata.
-    if getattr(
-        event,
-        "out",
-        False
-    ):
-
-        if await is_self_published(
-            source_id,
-            message.id
-        ):
-
-            print(
-                "[Self Published] Mensagem criada pelo Worker "
-                "ignorada para evitar cascata."
-            )
-
-            return
-
-        print(
-            "[Own Message] Mensagem da própria conta detectada. "
-            "Processando normalmente."
-        )
-
-    # Álbum é processado pelo events.Album.
-    if getattr(
-        message,
-        "grouped_id",
-        None
-    ):
-
-        if EVENT_DEBUG:
-
-            print(
-                "[Event] Mensagem pertence a álbum. "
-                "Aguardando Album handler."
-            )
-
-        return
-
-    matches = (
-        await get_matching_automations(
-            source_id
-        )
-    )
-
-    if not matches:
-        return
-
-    print(
-        "[NewMessage] Automação encontrada. "
-        "Iniciando processamento:",
-        source_id,
-        message.id
-    )
-
-    for automation in matches:
-
-        try:
-
-            print(
-                "[NewMessage] Executando automação:",
-                automation.get(
-                    "name"
-                )
-                or automation.get(
-                    "id"
-                )
-            )
-
-            await publish_single_message(
-                message,
-                source_id,
-                automation
-            )
-
-        except Exception as error:
-
-            print(
-                "[NewMessage] ERRO:",
-                type(error).__name__,
-                str(error)
-            )
-
-
-# ============================================================
-# ÁLBUM
-# ============================================================
-
-@client.on(
-    events.Album()
-)
-async def album_handler(
-    event
-):
-
-    source_id = event.chat_id
-
-    # Álbum manual da própria conta em um canal de origem
-    # também deve ser processado. Só ignoramos o que o Worker
-    # acabou de publicar num destino.
-    if getattr(event, "out", False):
-
-        if await is_self_published_album(
-            source_id,
-            event.messages
-        ):
-            print(
-                "[Self Published] Álbum criado pelo Worker "
-                "ignorado para evitar cascata."
-            )
-            return
-
-        print(
-            "[Own Album] Álbum manual da conta detectado. "
-            "Processando normalmente."
-        )
-
-    matches = (
-        await get_matching_automations(
-            source_id
-        )
-    )
-
-    if not matches:
-        return
-
-
-    media_messages = [
-        message
-        for message
-        in event.messages
-        if message.media
-    ]
-
-    if not media_messages:
-        return
-
-
-    caption_index = 0
-    caption_message = (
-        media_messages[0]
-    )
-
-
-    for index, message in enumerate(
-        media_messages
-    ):
-
-        if (
-            message.message
-            and
-            message.message.strip()
-        ):
-
-            caption_index = index
-            caption_message = message
-            break
-
-
-    original_caption = (
-        caption_message.message
-        or ""
-    )
-
-    original_entities = (
-        caption_message.entities
-        or []
-    )
-
-    medias = [
-        message.media
-        for message
-        in media_messages
-    ]
-
-
-    for automation in matches:
-
-        automation_id = automation["id"]
-
-        processing_key = (
-            f"album:"
-            f"{source_id}:"
-            f"{event.grouped_id}:"
-            f"{automation_id}"
-        )
-
-        claimed = await claim_processing_key(
-            processing_key
-        )
-
-        if not claimed:
-
-            print(
-                "[Duplicate] Álbum já está sendo processado:",
-                event.grouped_id
-            )
-
-            continue
-
-        fingerprint = build_album_fingerprint(
-            source_id=source_id,
-            automation_id=automation_id,
-            grouped_id=event.grouped_id,
-            messages=media_messages
-        )
-
-        fingerprint_claimed = await claim_fingerprint(fingerprint)
-
-        if not fingerprint_claimed:
-            print(
-                "[Duplicate Guard] Álbum repetido ignorado:",
-                fingerprint[:12],
-                "| grouped_id:",
-                event.grouped_id
-            )
-            await release_processing_key(processing_key)
-            continue
-
-        started_at = time.monotonic()
-
-        try:
-
-            # ------------------------------------------------
-            # IDEMPOTÊNCIA DO ÁLBUM
-            #
-            # Se qualquer item principal já estiver vinculado,
-            # tratamos o álbum como já publicado.
-            # ------------------------------------------------
-
-            existing_links = await find_message_links(
-
-                source_chat_id=
-                    source_id,
-
-                source_message_id=
-                    caption_message.id,
-
-                automation_id=
-                    automation_id
-            )
-
-            if existing_links:
-
-                print(
-                    "[Duplicate] Álbum já publicado. Ignorando:",
-                    event.grouped_id
-                )
-
-                continue
-
-
-            (
-                processed_caption,
-                processed_entities
-            ) = process_rich_text(
-
-                original_caption,
-                original_entities,
-                automation
-            )
-
-
-            if processed_caption is None:
-
-                print(
-                    "[Blacklist] Álbum bloqueado."
-                )
-
-                await send_log(
-
-                    automation_id=
-                        automation_id,
-
-                    source_message_id=
-                        caption_message.id,
-
-                    status="blocked",
-
-                    original_text=
-                        original_caption,
-
-                    blocked_reason=
-                        "blacklist"
-                )
-
-                continue
-
-
-            destination = (
-                automation.get(
-                    "destination_chat_id"
-                )
-            )
-
-            if not destination:
-                continue
-
-
-            if (
-                str(destination).strip()
-                ==
-                str(source_id).strip()
-            ):
-
-                continue
-
-
-            destination_entity = (
-                await resolve_destination_entity(
-                    destination
-                )
-            )
-
-
-            preserve_media = (
-                automation.get(
-                    "preserve_media",
-                    True
-                )
-            )
-
-            preserve_caption = (
-                automation.get(
-                    "preserve_caption",
-                    True
-                )
-            )
-
-            preserve_formatting = (
-                automation.get(
-                    "preserve_formatting",
-                    True
-                )
-            )
-
-
-            # ------------------------------------------------
-            # NÃO PRESERVAR MÍDIA
-            # ------------------------------------------------
-
-            if not preserve_media:
-
-                if not processed_caption:
-                    continue
-
-                sent = await client.send_message(
-
+            print(f"[Bypass] Origem restrita para mensagem {message.id}! Aplicando cópia por download/upload...")
+            if message.media:
+                temp_file = await client.download_media(message)
+                try:
+                    sent = await client.send_file(
+                        destination_entity,
+                        temp_file,
+                        caption=text_to_send,
+                        formatting_entities=message.entities
+                    )
+                    return sent
+                finally:
+                    if temp_file and os.path.exists(temp_file):
+                        os.remove(temp_file)
+            else:
+                return await client.send_message(
                     destination_entity,
-
-                    processed_caption,
-
-                    formatting_entities=(
-                        processed_entities
-                        if preserve_formatting
-                        else []
-                    )
+                    text_to_send,
+                    formatting_entities=message.entities
                 )
 
 
-                await remember_self_published(
-                    destination,
-                    sent.id
+async def send_album_with_bypass(destination_entity, messages, custom_caption=None):
+    """
+    Tenta encaminhar um álbum. Se a origem for protegida, baixa os arquivos em
+    lote e republica a galeria no destino mantendo a legenda.
+    """
+    async with MEDIA_SEND_SEMAPHORE:
+        temp_files = []
+        try:
+            # Tenta o encaminhamento nativo se não houve alteração no texto
+            if custom_caption is None:
+                try:
+                    sent_messages = await client.forward_messages(destination_entity, messages)
+                    return sent_messages
+                except ChatForwardsRestrictedError:
+                    print(f"[Bypass Album] Origem restrita no álbum de {len(messages)} mídias! Iniciando cópia...")
+
+            files_to_send = []
+            captions = []
+
+            for index, msg in enumerate(messages):
+                if msg.media:
+                    fpath = await client.download_media(msg)
+                    if fpath:
+                        temp_files.append(fpath)
+                        files_to_send.append(fpath)
+                        # Aplica a legenda customizada/original na primeira foto do álbum
+                        if index == 0 and custom_caption is not None:
+                            captions.append(custom_caption)
+                        else:
+                            captions.append(msg.message)
+
+            if files_to_send:
+                sent_messages = await client.send_file(
+                    destination_entity,
+                    files_to_send,
+                    caption=captions
                 )
-
-                await save_message_link(
-
-                    automation_id=
-                        automation_id,
-
-                    source_chat_id=
-                        source_id,
-
-                    source_message_id=
-                        caption_message.id,
-
-                    source_grouped_id=
-                        event.grouped_id,
-
-                    destination_chat_id=
-                        destination,
-
-                    destination_message_id=
-                        sent.id
-                )
-
-                continue
-
-
-            captions = [
-                ""
-                for _
-                in media_messages
-            ]
-
-            album_entities = [
-                []
-                for _
-                in media_messages
-            ]
-
-
-            if preserve_caption:
-
-                captions[
-                    caption_index
-                ] = processed_caption
-
-                if preserve_formatting:
-
-                    album_entities[
-                        caption_index
-                    ] = processed_entities
-
-
-            try:
-
-                print(
-                    "[Album] Enviando:",
-                    event.grouped_id,
-                    "| mídias:",
-                    len(medias)
-                )
-
-                async with MEDIA_SEND_SEMAPHORE:
-
-                    sent_messages = (
-                        await client.send_file(
-
-                            destination_entity,
-
-                            medias,
-
-                            caption=
-                                captions,
-
-                            formatting_entities=
-                                album_entities
-                        )
-                    )
-
-
-            except ChatForwardsRestrictedError:
-
-                print(
-                    "[Protected Chat] Telegram bloqueou "
-                    "o álbum por proteção do canal de origem. "
-                    "Álbum ignorado sem retry."
-                )
-
-                await send_log(
-
-                    automation_id=
-                        automation_id,
-
-                    source_message_id=
-                        caption_message.id,
-
-                    status="error",
-
-                    original_text=
-                        original_caption,
-
-                    processed_text=
-                        processed_caption,
-
-                    error_message=(
-                        "ChatForwardsRestrictedError: "
-                        "álbum protegido pelo canal de origem"
-                    )
-                )
-
-                continue
-
-
-            if not isinstance(
-                sent_messages,
-                list
-            ):
-
-                sent_messages = [
-                    sent_messages
-                ]
-
-
-            elapsed = (
-                time.monotonic()
-                -
-                started_at
-            )
-
-            print(
-                "[Album] Publicado:",
-                len(sent_messages),
-                "itens",
-                f"({elapsed:.2f}s)"
-            )
-
-
-            # ------------------------------------------------
-            # VINCULAR CADA ITEM
-            # ------------------------------------------------
-
-            for (
-                source_message,
-                destination_message
-            ) in zip(
-                media_messages,
-                sent_messages
-            ):
-
-                await remember_self_published(
-                    destination,
-                    destination_message.id
-                )
-
-                await save_message_link(
-
-                    automation_id=
-                        automation_id,
-
-                    source_chat_id=
-                        source_id,
-
-                    source_message_id=
-                        source_message.id,
-
-                    source_grouped_id=
-                        event.grouped_id,
-
-                    destination_chat_id=
-                        destination,
-
-                    destination_message_id=
-                        destination_message.id
-                )
-
-
-            await send_log(
-
-                automation_id=
-                    automation_id,
-
-                source_message_id=
-                    caption_message.id,
-
-                destination_message_id=(
-                    sent_messages[0].id
-                    if sent_messages
-                    else None
-                ),
-
-                status="published",
-
-                original_text=
-                    original_caption,
-
-                processed_text=
-                    processed_caption
-            )
-
+                return sent_messages if isinstance(sent_messages, list) else [sent_messages]
 
         finally:
+            for file_path in temp_files:
+                if file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
 
-            await release_processing_key(
-                processing_key
-            )
 
-
-# ============================================================
-# EDITAR MENSAGEM
-# ============================================================
-
-@client.on(
-    events.MessageEdited()
-)
-async def edited_message_handler(
-    event
-):
-
-    source_id = event.chat_id
+async def process_message_event(event):
     message = event.message
+    source_id = str(event.chat_id)
 
-    if source_id is None:
+    automations = await get_matching_automations(source_id)
+    if not automations:
         return
 
-    matches = (
-        await get_matching_automations(
-            source_id
-        )
-    )
+    for automation in automations:
+        automation_id = automation.get("id")
+        destination_id = automation.get("destination_chat_id")
 
-    if not matches:
-        return
-
-    print(
-        "[Edit] Mensagem editada:",
-        source_id,
-        message.id
-    )
-
-    for automation in matches:
-
-        links = await find_message_links(
-
-            source_chat_id=
-                source_id,
-
-            source_message_id=
-                message.id,
-
-            automation_id=
-                automation["id"]
-        )
-
-        if not links:
-
-            print(
-                "[Edit] Nenhum vínculo encontrado "
-                "para a mensagem."
-            )
-
+        if not destination_id:
             continue
 
-        (
-            processed_text,
-            processed_entities
-        ) = process_rich_text(
-
-            message.message or "",
-
-            message.entities or [],
-
-            automation
-        )
-
-        # Se edição passou a bater
-        # na blacklist, apagar destino.
-
-        if processed_text is None:
-
-            for link in links:
-
-                try:
-
-                    destination_entity = (
-                        await resolve_destination_entity(
-                            link[
-                                "destination_chat_id"
-                            ]
-                        )
-                    )
-
-                    await client.delete_messages(
-
-                        destination_entity,
-
-                        [
-                            int(
-                                link[
-                                    "destination_message_id"
-                                ]
-                            )
-                        ],
-
-                        revoke=True
-                    )
-
-                except Exception as error:
-
-                    print(
-                        "[Edit] Erro apagando "
-                        "mensagem bloqueada:",
-                        str(error)
-                    )
-
+        if await is_self_published(source_id, message.id):
             continue
 
-        preserve_caption = (
-            automation.get(
-                "preserve_caption",
-                True
-            )
-        )
-
-        preserve_formatting = (
-            automation.get(
-                "preserve_formatting",
-                True
-            )
-        )
-
-        # Se for mídia e preserve_caption=False,
-        # não existe legenda espelhada para editar.
-
-        if (
-            message.media
-            and
-            not preserve_caption
-        ):
-
+        lock_key = f"{automation_id}:{source_id}:{message.id}"
+        if not await claim_processing_key(lock_key):
             continue
 
-        for link in links:
+        try:
+            fingerprint = build_message_fingerprint(source_id, automation_id, message)
+            if not await claim_fingerprint(fingerprint):
+                continue
 
-            try:
+            replacements = get_active_replacements(automation)
+            blacklist = automation.get("blacklist", []) or []
 
-                destination_entity = (
-                    await resolve_destination_entity(
-                        link[
-                            "destination_chat_id"
-                        ]
-                    )
-                )
+            original_text = message.message or ""
+            if is_blacklisted(original_text, blacklist):
+                print(f"[Automação {automation_id}] Mensagem {message.id} contida pela Blacklist.")
+                continue
 
-                destination_message_id = int(
-                    link[
-                        "destination_message_id"
-                    ]
-                )
+            modified_text = apply_replacements(original_text, replacements)
+            custom_text = modified_text if modified_text != original_text else None
 
-                await client.edit_message(
+            destination_entity = await resolve_destination_entity(destination_id)
 
-                    destination_entity,
+            sent_msg = await send_single_message_with_bypass(
+                destination_entity,
+                message,
+                custom_text=custom_text
+            )
 
-                    destination_message_id,
-
-                    processed_text,
-
-                    formatting_entities=(
-                        processed_entities
-                        if preserve_formatting
-                        else []
-                    )
-                )
-
-                print(
-                    "[Edit] Atualizada:",
+            if sent_msg:
+                await remember_self_published(destination_id, sent_msg.id)
+                await save_message_link(
+                    automation_id,
+                    source_id,
                     message.id,
-                    "→",
-                    destination_message_id
+                    destination_id,
+                    sent_msg.id
                 )
 
-                await send_log(
+        except Exception as err:
+            print(f"[Automação Erro] Falha ao clonar mensagem {message.id}: {type(err).__name__} - {err}")
 
-                    automation_id=
-                        automation["id"],
-
-                    source_message_id=
-                        message.id,
-
-                    destination_message_id=
-                        destination_message_id,
-
-                    status="edited",
-
-                    original_text=
-                        message.message or "",
-
-                    processed_text=
-                        processed_text
-                )
-
-            except Exception as error:
-
-                print(
-                    "[Edit] ERRO:",
-                    type(error).__name__,
-                    str(error)
-                )
+        finally:
+            await release_processing_key(lock_key)
 
 
-# ============================================================
-# EXCLUIR MENSAGEM
-# ============================================================
-
-@client.on(
-    events.MessageDeleted()
-)
-async def deleted_message_handler(
-    event
-):
-
-    source_id = event.chat_id
-
-    print(
-        "[Delete] Evento recebido. Chat:",
-        source_id,
-        "IDs:",
-        event.deleted_ids
-    )
-
-    # Em canais/supergrupos normalmente
-    # temos chat_id.
-    #
-    # Se vier None, não vamos apagar no
-    # escuro para evitar excluir mensagem
-    # errada em outro chat.
-
-    if source_id is None:
-
-        print(
-            "[Delete] chat_id ausente. "
-            "Exclusão ignorada por segurança."
-        )
-
+async def process_album_messages(source_id, grouped_id, messages):
+    automations = await get_matching_automations(source_id)
+    if not automations:
         return
 
-    for source_message_id in (
-        event.deleted_ids
-    ):
+    for automation in automations:
+        automation_id = automation.get("id")
+        destination_id = automation.get("destination_chat_id")
 
-        links = await find_message_links(
-
-            source_chat_id=
-                source_id,
-
-            source_message_id=
-                source_message_id
-        )
-
-        if not links:
-
-            print(
-                "[Delete] Nenhum vínculo:",
-                source_message_id
-            )
-
+        if not destination_id:
             continue
 
-        # Agrupar por destino.
+        if await is_self_published_album(source_id, messages):
+            continue
 
-        grouped_destinations = (
-            defaultdict(list)
-        )
+        lock_key = f"album:{automation_id}:{source_id}:{grouped_id}"
+        if not await claim_processing_key(lock_key):
+            continue
 
-        for link in links:
+        try:
+            fingerprint = build_album_fingerprint(source_id, automation_id, grouped_id, messages)
+            if not await claim_fingerprint(fingerprint):
+                continue
 
-            grouped_destinations[
-                str(
-                    link[
-                        "destination_chat_id"
-                    ]
-                )
-            ].append(
-                int(
-                    link[
-                        "destination_message_id"
-                    ]
-                )
+            replacements = get_active_replacements(automation)
+            blacklist = automation.get("blacklist", []) or []
+
+            main_message = next((m for m in messages if m.message), messages[0])
+            original_text = main_message.message or ""
+
+            if is_blacklisted(original_text, blacklist):
+                print(f"[Álbum {automation_id}] Galeria {grouped_id} bloqueada por filtro de palavra.")
+                continue
+
+            modified_text = apply_replacements(original_text, replacements)
+            custom_caption = modified_text if modified_text != original_text else None
+
+            destination_entity = await resolve_destination_entity(destination_id)
+
+            sent_messages = await send_album_with_bypass(
+                destination_entity,
+                messages,
+                custom_caption=custom_caption
             )
 
-        for (
-            destination_chat_id,
-            destination_ids
-        ) in grouped_destinations.items():
-
-            try:
-
-                destination_entity = (
-                    await resolve_destination_entity(
-                        destination_chat_id
+            if sent_messages:
+                for src_m, dst_m in zip(messages, sent_messages):
+                    await remember_self_published(destination_id, dst_m.id)
+                    await save_message_link(
+                        automation_id,
+                        source_id,
+                        src_m.id,
+                        destination_id,
+                        dst_m.id,
+                        source_grouped_id=grouped_id
                     )
-                )
 
-                await client.delete_messages(
+        except Exception as err:
+            print(f"[Álbum Erro] Falha ao processar galeria {grouped_id}: {type(err).__name__} - {err}")
 
-                    destination_entity,
-
-                    destination_ids,
-
-                    revoke=True
-                )
-
-                print(
-                    "[Delete] Excluída(s) no destino:",
-                    destination_ids
-                )
-
-            except Exception as error:
-
-                print(
-                    "[Delete] ERRO:",
-                    type(error).__name__,
-                    str(error)
-                )
-
-        for link in links:
-
-            await send_log(
-
-                automation_id=
-                    link[
-                        "automation_id"
-                    ],
-
-                source_message_id=
-                    source_message_id,
-
-                destination_message_id=
-                    link[
-                        "destination_message_id"
-                    ],
-
-                status="deleted"
-            )
-
-        await remove_message_links(
-
-            source_chat_id=
-                source_id,
-
-            source_message_id=
-                source_message_id
-        )
+        finally:
+            await release_processing_key(lock_key)
 
 
 # ============================================================
-# RECUPERAÇÃO DE MENSAGENS PERDIDAS DA FONTE
+# BUFFER DE ÁLBUNS EM MEMÓRIA
+# ============================================================
+
+ALBUM_BUFFER = defaultdict(list)
+ALBUM_TASKS = {}
+
+
+async def album_flush_task(source_id, grouped_id):
+    await asyncio.sleep(1.5)
+    messages = ALBUM_BUFFER.pop((source_id, grouped_id), [])
+    ALBUM_TASKS.pop((source_id, grouped_id), None)
+
+    if messages:
+        messages.sort(key=lambda x: x.id)
+        await process_album_messages(source_id, grouped_id, messages)
+
+
+# ============================================================
+# SOURCE RECOVERY ENGINE (RECUPERAÇÃO DE HISTÓRICO PERDIDO)
 # ============================================================
 
 def load_source_recovery_state():
-    try:
-        with open(
-            SOURCE_RECOVERY_STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as state_file:
-            raw_state = json.load(state_file)
-
-        if not isinstance(raw_state, dict):
-            return {}
-
-        state = {}
-
-        for source_id, message_id in raw_state.items():
-            try:
-                state[str(source_id).strip()] = int(message_id)
-            except (TypeError, ValueError):
-                continue
-
-        return state
-
-    except FileNotFoundError:
+    if not os.path.exists(SOURCE_RECOVERY_STATE_FILE):
         return {}
 
-    except Exception as error:
-        print(
-            "[Recovery] Estado inválido. Iniciando novo:",
-            type(error).__name__,
-            str(error)
-        )
+    try:
+        with open(SOURCE_RECOVERY_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as err:
+        print("[Recovery] Erro ao ler arquivo de estado:", err)
         return {}
 
 
 def save_source_recovery_state(state):
-    state_directory = os.path.dirname(
-        os.path.abspath(SOURCE_RECOVERY_STATE_FILE)
-    )
-    os.makedirs(state_directory, exist_ok=True)
-
-    temporary_path = (
-        SOURCE_RECOVERY_STATE_FILE
-        + ".tmp"
-    )
-
-    with open(
-        temporary_path,
-        "w",
-        encoding="utf-8"
-    ) as state_file:
-        json.dump(
-            state,
-            state_file,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True
-        )
-        state_file.flush()
-        os.fsync(state_file.fileno())
-
-    os.replace(
-        temporary_path,
-        SOURCE_RECOVERY_STATE_FILE
-    )
-
-
-def active_source_ids(automations):
-    sources = []
-    seen = set()
-
-    for automation in automations:
-        source = automation.get("source_chat_id")
-
-        if source is None:
-            continue
-
-        source_text = str(source).strip()
-
-        if not source_text or source_text in seen:
-            continue
-
-        seen.add(source_text)
-        sources.append(source_text)
-
-    return sources
-
-
-def source_id_value(source_text):
-    if source_text.lstrip("-").isdigit():
-        return int(source_text)
-
-    return source_text
-
-
-async def recover_source_messages(
-    source_text,
-    last_message_id
-):
-    source_id = source_id_value(source_text)
-    source_entity = await resolve_destination_entity(
-        source_id
-    )
-
-    recovered_messages = []
-
-    async for message in client.iter_messages(
-        source_entity,
-        min_id=int(last_message_id),
-        limit=SOURCE_RECOVERY_MAX_MESSAGES
-    ):
-        recovered_messages.append(message)
-
-    if not recovered_messages:
-
-        if EVENT_DEBUG:
-
-            print(
-                "[Recovery] Nenhuma mensagem nova | fonte:",
-                source_text,
-                "| depois do ID:",
-                last_message_id
-            )
-
-        return int(last_message_id)
-
-    # iter_messages retorna do mais novo para o mais antigo.
-    # Processamos na ordem original do canal.
-    recovered_messages.sort(
-        key=lambda item: int(item.id)
-    )
-
-    print(
-        "[Recovery] Mensagens recuperadas:",
-        len(recovered_messages),
-        "| fonte:",
-        source_text,
-        "| depois do ID:",
-        last_message_id
-    )
-
-    processed_albums = set()
-    newest_message_id = int(last_message_id)
-
-    for message in recovered_messages:
-        newest_message_id = max(
-            newest_message_id,
-            int(message.id)
-        )
-
-        grouped_id = getattr(
-            message,
-            "grouped_id",
-            None
-        )
-
-        if grouped_id:
-            if grouped_id in processed_albums:
-                continue
-
-            album_messages = [
-                album_message
-                for album_message in recovered_messages
-                if getattr(
-                    album_message,
-                    "grouped_id",
-                    None
-                ) == grouped_id
-            ]
-
-            processed_albums.add(grouped_id)
-
-            await album_handler(
-                SimpleNamespace(
-                    chat_id=source_id,
-                    grouped_id=grouped_id,
-                    messages=album_messages,
-                    out=any(
-                        bool(getattr(item, "out", False))
-                        for item in album_messages
-                    )
-                )
-            )
-
-            continue
-
-        await new_message_handler(
-            SimpleNamespace(
-                chat_id=source_id,
-                message=message,
-                out=bool(getattr(message, "out", False))
-            )
-        )
-
-    return newest_message_id
+    try:
+        tmp_file = f"{SOURCE_RECOVERY_STATE_FILE}.tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_file, SOURCE_RECOVERY_STATE_FILE)
+    except Exception as err:
+        print("[Recovery] Erro ao salvar estado:", err)
 
 
 async def source_recovery_loop():
-    state = load_source_recovery_state()
-
-    print(
-        "[Recovery] Ativo. Intervalo:",
-        SOURCE_RECOVERY_INTERVAL,
-        "segundos"
-    )
-
     while True:
         try:
             automations = await load_automations()
-            sources = active_source_ids(automations)
+            active_sources = set()
 
-            for source_text in sources:
-                source_id = source_id_value(source_text)
-                source_entity = await resolve_destination_entity(
-                    source_id
-                )
+            for auto in automations:
+                src = auto.get("source_chat_id")
+                if src:
+                    active_sources.add(str(src).strip())
 
-                # Na primeira execução, criamos um marco no último ID atual.
-                # Assim o deploy não repassa todo o histórico antigo do canal.
-                if source_text not in state:
-                    latest_messages = await client.get_messages(
-                        source_entity,
-                        limit=1
-                    )
+            state = load_source_recovery_state()
 
-                    latest_id = (
-                        int(latest_messages[0].id)
-                        if latest_messages
-                        else 0
-                    )
+            for source_id in active_sources:
+                try:
+                    last_processed_id = state.get(source_id, 0)
+                    entity = await resolve_destination_entity(source_id)
 
-                    state[source_text] = latest_id
-                    save_source_recovery_state(state)
+                    messages_to_process = []
+                    async for msg in client.iter_messages(
+                        entity,
+                        min_id=last_processed_id,
+                        limit=SOURCE_RECOVERY_MAX_MESSAGES,
+                        reverse=True
+                    ):
+                        messages_to_process.append(msg)
 
-                    print(
-                        "[Recovery] Fonte inicializada:",
-                        source_text,
-                        "| último ID:",
-                        latest_id
-                    )
-                    continue
+                    if messages_to_process:
+                        max_id = last_processed_id
 
-                newest_id = await recover_source_messages(
-                    source_text,
-                    state[source_text]
-                )
+                        for msg in messages_to_process:
+                            if msg.id > max_id:
+                                max_id = msg.id
 
-                if newest_id > state[source_text]:
-                    state[source_text] = newest_id
-                    save_source_recovery_state(state)
+                            event_mock = SimpleNamespace(
+                                message=msg,
+                                chat_id=int(source_id),
+                                grouped_id=msg.grouped_id
+                            )
 
-        except Exception as error:
-            print(
-                "[Recovery] ERRO:",
-                type(error).__name__,
-                str(error)
-            )
+                            if msg.grouped_id:
+                                key = (source_id, msg.grouped_id)
+                                ALBUM_BUFFER[key].append(msg)
+                                if key not in ALBUM_TASKS:
+                                    ALBUM_TASKS[key] = asyncio.create_task(
+                                        album_flush_task(source_id, msg.grouped_id)
+                                    )
+                            else:
+                                await process_message_event(event_mock)
 
-        await asyncio.sleep(
-            max(5, SOURCE_RECOVERY_INTERVAL)
-        )
+                        state[source_id] = max_id
+                        save_source_recovery_state(state)
+
+                except Exception as src_err:
+                    print(f"[Recovery Error] Falha ao varrer canal {source_id}: {src_err}")
+
+        except Exception as loop_err:
+            print(f"[Recovery Error] Exceção geral no ciclo de recuperação: {loop_err}")
+
+        await asyncio.sleep(SOURCE_RECOVERY_INTERVAL)
 
 
 # ============================================================
-# MAIN
+# LISTENERS DE EVENTOS DO TELEGRAM (NEW / EDIT / DELETE)
+# ============================================================
+
+@client.on(events.NewMessage)
+async def on_new_message(event):
+    if event.grouped_id:
+        source_id = str(event.chat_id)
+        key = (source_id, event.grouped_id)
+
+        ALBUM_BUFFER[key].append(event.message)
+
+        if key not in ALBUM_TASKS:
+            ALBUM_TASKS[key] = asyncio.create_task(
+                album_flush_task(source_id, event.grouped_id)
+            )
+    else:
+        await process_message_event(event)
+
+
+@client.on(events.MessageEdited)
+async def on_message_edited(event):
+    source_id = str(event.chat_id)
+    message_id = event.message.id
+
+    links = await find_message_links(source_id, message_id)
+    if not links:
+        return
+
+    for link in links:
+        try:
+            automation_id = link.get("automation_id")
+            automations = await load_automations()
+            automation = next((a for a in automations if a.get("id") == automation_id), None)
+
+            if not automation:
+                continue
+
+            replacements = get_active_replacements(automation)
+            original_text = event.message.message or ""
+            new_text = apply_replacements(original_text, replacements)
+
+            destination_entity = await resolve_destination_entity(link["destination_chat_id"])
+            await client.edit_message(
+                destination_entity,
+                int(link["destination_message_id"]),
+                new_text,
+                formatting_entities=event.message.entities
+            )
+            print(f"[Edição Sincronizada] Destino {link['destination_message_id']} atualizado.")
+        except Exception as err:
+            print(f"[Edição Erro] Falha ao replicar alteração: {err}")
+
+
+@client.on(events.MessageDeleted)
+async def on_message_deleted(event):
+    source_id = str(event.chat_id)
+    for deleted_id in event.deleted_ids:
+        links = await find_message_links(source_id, deleted_id)
+        if not links:
+            continue
+
+        for link in links:
+            try:
+                destination_entity = await resolve_destination_entity(link["destination_chat_id"])
+                await client.delete_messages(destination_entity, [int(link["destination_message_id"])])
+                print(f"[Deleção Sincronizada] Mensagem {link['destination_message_id']} removida do destino.")
+            except Exception as err:
+                print(f"[Deleção Erro] Falha ao apagar no destino: {err}")
+
+        await remove_message_links(source_id, deleted_id)
+
+
+# ============================================================
+# INITIALIZATION / ENTRYPOINT
 # ============================================================
 
 async def main():
-
-    print(
-        "================================="
-    )
-
-    print(
-        " TELEGRAM WORKER"
-    )
-
-    print(
-        f" VERSION {WORKER_VERSION}"
-    )
-
-    print(
-        "================================="
-    )
-
-    print(
-        "[Worker] Conectando..."
-    )
-
-    # Impede que duas instâncias locais do mesmo Worker
-    # publiquem a mesma mensagem em duplicidade.
     acquire_process_lock()
 
+    print("[Worker] Estabelecendo conexão com o Telegram...")
     await client.start()
 
     me = await client.get_me()
-
-    print(
-        "[Telegram] Conectado!"
-    )
-
-    print(
-        "[Telegram] ID:",
-        me.id
-    )
-
-    print(
-        "[Telegram] Nome:",
-        me.first_name
-    )
-
-    if me.username:
-
-        print(
-            "[Telegram] Username:",
-            f"@{me.username}"
-        )
+    print(f"[Worker] Conectado como: {me.first_name} (@{me.username}) - ID: {me.id}")
 
     await warm_entity_cache()
+    await send_heartbeat()
+    await sync_telegram_chats()
 
-    print(
-        "[Lovable] Testando..."
-    )
+    # Dispara serviços em segundo plano
+    asyncio.create_task(heartbeat_loop())
+    asyncio.create_task(chat_sync_loop())
+    asyncio.create_task(cache_maintenance_loop())
+    asyncio.create_task(source_recovery_loop())
 
-    try:
-
-        automations = (
-            await load_automations(
-                force_refresh=True
-            )
-        )
-
-        print(
-            "[Lovable] Conectado!"
-        )
-
-        print(
-            "[Lovable] Automações ativas:",
-            len(automations)
-        )
-
-        debug_automations(
-            automations
-        )
-
-    except Exception as error:
-
-        print(
-            "[Lovable] ERRO:",
-            type(error).__name__,
-            str(error)
-        )
-
-    try:
-
-        await send_heartbeat()
-
-    except Exception as error:
-
-        print(
-            "[Heartbeat] inicial falhou:",
-            str(error)
-        )
-
-    try:
-
-        await sync_telegram_chats()
-
-    except Exception as error:
-
-        print(
-            "[Chats] sync inicial falhou:",
-            str(error)
-        )
-
-    asyncio.create_task(
-        heartbeat_loop()
-    )
-
-    asyncio.create_task(
-        chat_sync_loop()
-    )
-
-    asyncio.create_task(
-        cache_maintenance_loop()
-    )
-
-    asyncio.create_task(
-        source_recovery_loop()
-    )
-
-    print(
-        "================================="
-    )
-
-    print(
-        "[Worker] ONLINE"
-    )
-
-    print(
-        "[Worker] Event debug:",
-        "ATIVO" if EVENT_DEBUG else "DESATIVADO"
-    )
-
-    print(
-        "[Worker] Listener NewMessage universal: ATIVO"
-    )
-
-    print(
-        "[Worker] Álbuns: ATIVO"
-    )
-
-    print(
-        "[Worker] Formatação: ATIVO"
-    )
-
-    print(
-        "[Worker] Hyperlink replace: ATIVO"
-    )
-
-    print(
-        "[Worker] Edição sincronizada: ATIVO"
-    )
-
-    print(
-        "[Worker] Exclusão sincronizada: ATIVO"
-    )
-
-    print(
-        "[Worker] Anti-duplicação: ATIVO"
-    )
-
-    print(
-        "[Worker] Dedupe por fingerprint: ATIVO"
-    )
-
-    print(
-        "[Worker] Own-message guard inteligente: ATIVO"
-    )
-
-    print(
-        "[Worker] Recuperação de fontes sem depender do Mac: ATIVO"
-    )
-
-    print(
-        "[Worker] Proteção de mídia restrita: ATIVO"
-    )
-
-    print(
-        "[Worker] Cache com TTL/LRU: ATIVO"
-    )
-
-    print(
-        "[Worker] HTTP Keep-Alive: ATIVO"
-    )
-
-    print(
-        "[Worker] Upload de mídia serializado: ATIVO"
-    )
-
-    print(
-        "================================="
-    )
-
-    try:
-        await client.run_until_disconnected()
-    finally:
-        await close_http_client()
+    print("[Worker] Todos os módulos carregados. Aguardando mensagens...")
+    await client.run_until_disconnected()
 
 
 if __name__ == "__main__":
-
-    asyncio.run(
-        main()
-    )
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[Worker] Parado pelo usuário.")
+    finally:
+        asyncio.run(close_http_client())
