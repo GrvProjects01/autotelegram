@@ -46,7 +46,7 @@ WORKER_ID = os.getenv(
     "telegram-main"
 )
 
-WORKER_VERSION = "1.2.0"
+WORKER_VERSION = "1.3.0-safe-protected"
 
 # Diagnóstico dos updates recebidos do Telegram.
 # Deixe "1" durante os testes. Depois pode mudar para "0" no .env
@@ -1978,6 +1978,159 @@ async def send_log(
         )
 
 
+
+# ============================================================
+# CONTEÚDO PROTEGIDO / NOFORWARDS
+# ============================================================
+
+PROTECTED_CONTENT_PLACEHOLDER = os.getenv(
+    "TELEGRAM_PROTECTED_CONTENT_PLACEHOLDER",
+    "🔒 Conteúdo protegido na origem. A mídia não pode ser copiada automaticamente."
+)
+
+def message_is_protected(message):
+    return bool(
+        getattr(message, "noforwards", False)
+        or getattr(message, "no_forwards", False)
+    )
+
+
+async def publish_text_fallback_for_protected(
+    message,
+    source_id,
+    automation,
+    processed_text,
+    processed_entities,
+    preserve_formatting,
+    reason
+):
+    automation_id = automation["id"]
+    destination = automation.get("destination_chat_id")
+
+    if not destination:
+        return None
+
+    if str(destination).strip() == str(source_id).strip():
+        return None
+
+    destination_entity = await resolve_destination_entity(destination)
+
+    final_text = processed_text or PROTECTED_CONTENT_PLACEHOLDER
+    final_entities = (
+        processed_entities
+        if processed_text and preserve_formatting
+        else []
+    )
+
+    sent = await client.send_message(
+        destination_entity,
+        final_text,
+        formatting_entities=final_entities
+    )
+
+    await remember_self_published(destination, sent.id)
+
+    await save_message_link(
+        automation_id=automation_id,
+        source_chat_id=source_id,
+        source_message_id=message.id,
+        destination_chat_id=destination,
+        destination_message_id=sent.id
+    )
+
+    await send_log(
+        automation_id=automation_id,
+        source_message_id=message.id,
+        destination_message_id=sent.id,
+        status="published",
+        original_text=message.message or "",
+        processed_text=final_text,
+        blocked_reason="protected_media",
+        error_message=(
+            f"{reason}: mídia protegida pela origem; "
+            "texto/legenda foi publicado normalmente."
+        )
+    )
+
+    print(
+        "[Protected Chat] Texto/legenda publicado sem mídia:",
+        message.id,
+        "→",
+        sent.id
+    )
+
+    return sent
+
+
+async def publish_album_text_fallback_for_protected(
+    caption_message,
+    source_id,
+    automation,
+    grouped_id,
+    processed_caption,
+    processed_entities,
+    preserve_formatting,
+    reason
+):
+    automation_id = automation["id"]
+    destination = automation.get("destination_chat_id")
+
+    if not destination:
+        return None
+
+    if str(destination).strip() == str(source_id).strip():
+        return None
+
+    destination_entity = await resolve_destination_entity(destination)
+
+    final_text = processed_caption or PROTECTED_CONTENT_PLACEHOLDER
+    final_entities = (
+        processed_entities
+        if processed_caption and preserve_formatting
+        else []
+    )
+
+    sent = await client.send_message(
+        destination_entity,
+        final_text,
+        formatting_entities=final_entities
+    )
+
+    await remember_self_published(destination, sent.id)
+
+    await save_message_link(
+        automation_id=automation_id,
+        source_chat_id=source_id,
+        source_message_id=caption_message.id,
+        source_grouped_id=grouped_id,
+        destination_chat_id=destination,
+        destination_message_id=sent.id
+    )
+
+    await send_log(
+        automation_id=automation_id,
+        source_message_id=caption_message.id,
+        destination_message_id=sent.id,
+        status="published",
+        original_text=caption_message.message or "",
+        processed_text=final_text,
+        blocked_reason="protected_album_media",
+        error_message=(
+            f"{reason}: álbum protegido pela origem; "
+            "texto/legenda foi publicado normalmente."
+        )
+    )
+
+    print(
+        "[Protected Chat] Texto/legenda do álbum publicado sem mídia:",
+        grouped_id,
+        "→",
+        sent.id
+    )
+
+    return sent
+
+
 # ============================================================
 # PUBLICAR MENSAGEM NORMAL
 # ============================================================
@@ -2149,6 +2302,22 @@ async def publish_single_message(
             else []
         )
 
+        if (
+            message.media
+            and preserve_media
+            and message_is_protected(message)
+        ):
+            await publish_text_fallback_for_protected(
+                message=message,
+                source_id=source_id,
+                automation=automation,
+                processed_text=(processed_text if preserve_caption else ""),
+                processed_entities=(processed_entities if preserve_caption else []),
+                preserve_formatting=preserve_formatting,
+                reason="noforwards"
+            )
+            return
+
 
         try:
 
@@ -2211,40 +2380,19 @@ async def publish_single_message(
 
         except ChatForwardsRestrictedError:
 
-            # IMPORTANTE:
-            # O Telegram marcou o chat de origem como protegido
-            # contra encaminhamento/cópia de mídia.
-            #
-            # Não tentamos baixar/reupar a mídia para contornar
-            # essa proteção. Também não fazemos retry, porque
-            # isso pode gerar processamento repetido/duplicado.
-
             print(
-                "[Protected Chat] Telegram bloqueou o envio "
-                "desta mídia por proteção do canal de origem. "
-                "Mensagem ignorada sem retry."
+                "[Protected Chat] Telegram bloqueou a mídia. "
+                "Publicando apenas texto/legenda processado."
             )
 
-            await send_log(
-
-                automation_id=
-                    automation_id,
-
-                source_message_id=
-                    message.id,
-
-                status="error",
-
-                original_text=
-                    original_text,
-
-                processed_text=
-                    processed_text,
-
-                error_message=(
-                    "ChatForwardsRestrictedError: "
-                    "mídia protegida pelo canal de origem"
-                )
+            await publish_text_fallback_for_protected(
+                message=message,
+                source_id=source_id,
+                automation=automation,
+                processed_text=(processed_text if preserve_caption else ""),
+                processed_entities=(processed_entities if preserve_caption else []),
+                preserve_formatting=preserve_formatting,
+                reason="ChatForwardsRestrictedError"
             )
 
             return
@@ -2847,6 +2995,29 @@ async def album_handler(
                     ] = processed_entities
 
 
+            if any(
+                message_is_protected(item)
+                for item in media_messages
+            ):
+                print(
+                    "[Protected Chat] Álbum protegido detectado. "
+                    "Publicando apenas texto/legenda processado."
+                )
+
+                await publish_album_text_fallback_for_protected(
+                    caption_message=caption_message,
+                    source_id=source_id,
+                    automation=automation,
+                    grouped_id=event.grouped_id,
+                    processed_caption=(processed_caption if preserve_caption else ""),
+                    processed_entities=(processed_entities if preserve_caption else []),
+                    preserve_formatting=preserve_formatting,
+                    reason="noforwards"
+                )
+
+                continue
+
+
             try:
 
                 print(
@@ -2877,34 +3048,23 @@ async def album_handler(
             except ChatForwardsRestrictedError:
 
                 print(
-                    "[Protected Chat] Telegram bloqueou "
-                    "o álbum por proteção do canal de origem. "
-                    "Álbum ignorado sem retry."
+                    "[Protected Chat] Telegram bloqueou o álbum. "
+                    "Publicando apenas texto/legenda processado."
                 )
 
-                await send_log(
-
-                    automation_id=
-                        automation_id,
-
-                    source_message_id=
-                        caption_message.id,
-
-                    status="error",
-
-                    original_text=
-                        original_caption,
-
-                    processed_text=
-                        processed_caption,
-
-                    error_message=(
-                        "ChatForwardsRestrictedError: "
-                        "álbum protegido pelo canal de origem"
-                    )
+                await publish_album_text_fallback_for_protected(
+                    caption_message=caption_message,
+                    source_id=source_id,
+                    automation=automation,
+                    grouped_id=event.grouped_id,
+                    processed_caption=(processed_caption if preserve_caption else ""),
+                    processed_entities=(processed_entities if preserve_caption else []),
+                    preserve_formatting=preserve_formatting,
+                    reason="ChatForwardsRestrictedError"
                 )
 
                 continue
+
 
 
             if not isinstance(
@@ -3798,6 +3958,10 @@ async def main():
 
     print(
         "[Worker] Proteção de mídia restrita: ATIVO"
+    )
+
+    print(
+        "[Worker] Fallback texto/legenda para mídia protegida: ATIVO"
     )
 
     print(
