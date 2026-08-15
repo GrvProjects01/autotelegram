@@ -1447,6 +1447,7 @@ def normalize_replacement_rule(rule):
         or rule.get("from")
         or rule.get("original")
         or rule.get("old_value")
+        or rule.get("oldValue")
         or ""
     )
 
@@ -1457,7 +1458,8 @@ def normalize_replacement_rule(rule):
         "target",
         "to",
         "new_value",
-        "destination"
+        "destination",
+        "newValue"
     ):
         if key in rule:
             replacement = rule.get(key)
@@ -2296,43 +2298,18 @@ async def publish_single_message(
             )
         )
 
-        formatting_entities = (
-            processed_entities
-            if preserve_formatting
-            else []
-        )
-
+        # === AJUSTE PRINCIPAL: ACEITA CANAIS DE TERCEIROS COM RESTRIÇÃO ===
+        # Permite envio de mídia mesmo se Telegram bloquear o encaminhamento.
+        # Prioriza mídia (se preserve_media) quando possível. Se não conseguir,
+        # cai automaticamente para o fallback de texto + placeholder.
         if (
             message.media
             and preserve_media
-            and message_is_protected(message)
         ):
-            await publish_text_fallback_for_protected(
-                message=message,
-                source_id=source_id,
-                automation=automation,
-                processed_text=(processed_text if preserve_caption else ""),
-                processed_entities=(processed_entities if preserve_caption else []),
-                preserve_formatting=preserve_formatting,
-                reason="noforwards"
-            )
-            return
-
-
-        try:
-
-            # ------------------------------------------------
-            # MÍDIA
-            # ------------------------------------------------
-
-            if (
-                message.media
-                and
-                preserve_media
-            ):
+            try:
 
                 print(
-                    "[Media] Iniciando envio:",
+                    "[Media] Iniciando envio (aceitando restrição de encaminhamento):",
                     message.id
                 )
 
@@ -2357,45 +2334,53 @@ async def publish_single_message(
                         )
                     )
 
-
-            # ------------------------------------------------
-            # TEXTO
-            # ------------------------------------------------
-
-            else:
-
-                if not processed_text:
-                    return
-
-                sent = await client.send_message(
-
-                    destination_entity,
-
-                    processed_text,
-
-                    formatting_entities=
-                        formatting_entities
+            except ChatForwardsRestrictedError:
+                print(
+                    "[Protected Chat - Terceiro] Telegram bloqueou a mídia. "
+                    "Publicando apenas texto/legenda processado."
                 )
 
+                await publish_text_fallback_for_protected(
+                    message=message,
+                    source_id=source_id,
+                    automation=automation,
+                    processed_text=(processed_text if preserve_caption else ""),
+                    processed_entities=(processed_entities if preserve_caption else []),
+                    preserve_formatting=preserve_formatting,
+                    reason="ChatForwardsRestrictedError"
+                )
+                return
 
-        except ChatForwardsRestrictedError:
+            except Exception as media_err:
+                print(
+                    "[Media] Erro ao enviar mídia (aceitando restrição):",
+                    type(media_err).__name__, str(media_err)
+                )
+                await publish_text_fallback_for_protected(
+                    message=message,
+                    source_id=source_id,
+                    automation=automation,
+                    processed_text=(processed_text if preserve_caption else ""),
+                    processed_entities=(processed_entities if preserve_caption else []),
+                    preserve_formatting=preserve_formatting,
+                    reason="MediaSendError"
+                )
+                return
 
-            print(
-                "[Protected Chat] Telegram bloqueou a mídia. "
-                "Publicando apenas texto/legenda processado."
+        else:
+
+            if not processed_text:
+                return
+
+            sent = await client.send_message(
+
+                destination_entity,
+
+                processed_text,
+
+                formatting_entities=
+                    formatting_entities
             )
-
-            await publish_text_fallback_for_protected(
-                message=message,
-                source_id=source_id,
-                automation=automation,
-                processed_text=(processed_text if preserve_caption else ""),
-                processed_entities=(processed_entities if preserve_caption else []),
-                preserve_formatting=preserve_formatting,
-                reason="ChatForwardsRestrictedError"
-            )
-
-            return
 
 
         elapsed = (
@@ -3048,7 +3033,7 @@ async def album_handler(
             except ChatForwardsRestrictedError:
 
                 print(
-                    "[Protected Chat] Telegram bloqueou o álbum. "
+                    "[Protected Chat - Terceiro] Telegram bloqueou o álbum. "
                     "Publicando apenas texto/legenda processado."
                 )
 
@@ -3974,6 +3959,10 @@ async def main():
 
     print(
         "[Worker] Upload de mídia serializado: ATIVO"
+    )
+
+    print(
+        "[Worker] Suporte a canais de terceiros com restrição de encaminhamento: ATIVO"
     )
 
     print(
