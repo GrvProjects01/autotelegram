@@ -46,7 +46,7 @@ WORKER_ID = os.getenv(
     "telegram-main"
 )
 
-WORKER_VERSION = "1.4.0-protected-media-bypass"
+WORKER_VERSION = "1.4.1-link-fix"
 
 # Diagnóstico dos updates recebidos do Telegram.
 EVENT_DEBUG = os.getenv("TELEGRAM_EVENT_DEBUG", "1").strip() == "1"
@@ -1071,7 +1071,6 @@ def find_replacement_occurrences(text, replacements):
 
         flags = 0 if rule.get("case_sensitive", False) else re.IGNORECASE
         pattern = re.compile(re.escape(find), flags)
-        applied_count = 0
 
         while True:
             match = pattern.search(working_text)
@@ -1095,12 +1094,10 @@ def find_replacement_occurrences(text, replacements):
                 + working_text[end:]
             )
 
-            applied_count += 1
-
     return working_text, occurrences
 
 
-def adjust_entities_for_replacements(entities, occurrences):
+def adjust_entities_for_replacements(entities, occurrences, max_text_len=0):
     if not entities:
         return []
 
@@ -1119,17 +1116,21 @@ def adjust_entities_for_replacements(entities, occurrences):
 
             if replace_end <= entity_start:
                 entity.offset += delta
-            elif (
-                replace_start < entity_end
-                and replace_end > entity_start
-            ):
+            elif replace_start < entity_end and replace_end > entity_start:
                 entity.length = max(0, entity.length + delta)
 
-    return [
-        entity
-        for entity in result
-        if getattr(entity, "length", 0) > 0
-    ]
+    valid_entities = []
+    for entity in result:
+        if getattr(entity, "length", 0) <= 0:
+            continue
+        if max_text_len > 0:
+            if entity.offset >= max_text_len:
+                continue
+            if entity.offset + entity.length > max_text_len:
+                entity.length = max_text_len - entity.offset
+        valid_entities.append(entity)
+
+    return valid_entities
 
 
 def process_hidden_urls(entities, replacements):
@@ -1188,6 +1189,7 @@ def process_rich_text(text, entities, automation):
         return None, []
 
     replacements = get_active_replacements(automation)
+    
     entities = process_hidden_urls(entities, replacements)
 
     processed_text, occurrences = find_replacement_occurrences(
@@ -1195,9 +1197,11 @@ def process_rich_text(text, entities, automation):
         replacements
     )
 
+    final_len = utf16_length(processed_text)
     processed_entities = adjust_entities_for_replacements(
         entities,
-        occurrences
+        occurrences,
+        max_text_len=final_len
     )
 
     return processed_text, processed_entities
@@ -1322,7 +1326,6 @@ async def publish_single_message(
 
         if message.media and preserve_media:
             async with MEDIA_SEND_SEMAPHORE:
-                # Tentativa inicial: reenvio direto da mídia do Telegram
                 try:
                     sent = await client.send_file(
                         destination_entity,
@@ -1341,7 +1344,6 @@ async def publish_single_message(
                     )
                     temp_file_path = None
                     try:
-                        # Faz o download temporário no disco local para contornar restrição de encaminhamento
                         temp_file_path = await client.download_media(message)
                         
                         sent = await client.send_file(
@@ -1360,7 +1362,6 @@ async def publish_single_message(
                             "[Protected Media Error] Falha no bypass de download:",
                             str(download_err)
                         )
-                        # Fallback de texto se download falhar completamente
                         sent = await client.send_message(
                             destination_entity,
                             processed_text or "🔒 Conteúdo protegido indisponível.",
@@ -1544,7 +1545,6 @@ async def album_handler(event):
             async with MEDIA_SEND_SEMAPHORE:
                 sent_messages = None
                 try:
-                    # Envio padrão
                     medias = [m.media for m in media_messages]
                     sent_messages = await client.send_file(
                         destination_entity,
@@ -1572,7 +1572,6 @@ async def album_handler(event):
                         print("[Protected Album] Bypass de álbum enviado com sucesso!")
                     except Exception as album_err:
                         print("[Protected Album Error] Falha no bypass do álbum:", str(album_err))
-                        # Fallback de texto se falhar download do álbum
                         sent_msg = await client.send_message(
                             destination_entity,
                             processed_caption or "🔒 Conteúdo de álbum protegido indisponível.",
@@ -1986,7 +1985,7 @@ async def main():
     asyncio.create_task(cache_maintenance_loop())
     asyncio.create_task(source_recovery_loop())
 
-    print("[Worker] ONLINE com Bypass de Conteúdo Protegido Ativo")
+    print("[Worker] ONLINE com Bypass e Correção de Entidades Ativa")
     print("=================================")
 
     try:
