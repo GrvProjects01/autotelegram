@@ -22,6 +22,7 @@ from telethon.tl.types import (
 )
 
 from dotenv import load_dotenv
+from telegram_buttons import TelegramButtonPublisher
 
 
 # ============================================================
@@ -46,7 +47,7 @@ WORKER_ID = os.getenv(
     "telegram-main"
 )
 
-WORKER_VERSION = "1.4.1-link-fix"
+WORKER_VERSION = "1.5.0-inline-buttons"
 
 # Diagnóstico dos updates recebidos do Telegram.
 EVENT_DEBUG = os.getenv("TELEGRAM_EVENT_DEBUG", "1").strip() == "1"
@@ -87,6 +88,11 @@ SOURCE_RECOVERY_STATE_FILE = os.getenv(
 
 client = TelegramClient(
     SESSION_NAME,
+    API_ID,
+    API_HASH
+)
+
+button_publisher = TelegramButtonPublisher(
     API_ID,
     API_HASH
 )
@@ -206,6 +212,10 @@ def cleanup_local_caches():
 
     while len(ENTITY_CACHE) > ENTITY_CACHE_MAX:
         ENTITY_CACHE.popitem(last=False)
+
+
+def automation_has_inline_buttons(automation):
+    return TelegramButtonPublisher.has_buttons(automation)
 
 
 async def cache_maintenance_loop():
@@ -593,6 +603,7 @@ def debug_automations(automations):
     for index, automation in enumerate(automations, start=1):
         replacements = automation.get("replacements", []) or []
         blacklist = automation.get("blacklist", []) or []
+        buttons = TelegramButtonPublisher.normalize_buttons(automation)
 
         print(f"\n[DEBUG] Automação #{index}")
         print("[DEBUG] ID:", automation.get("id"))
@@ -601,6 +612,7 @@ def debug_automations(automations):
         print("[DEBUG] Destination:", automation.get("destination_chat_id"))
         print("[DEBUG] Replacements:", len(replacements))
         print("[DEBUG] Blacklist:", len(blacklist))
+        print("[DEBUG] Buttons:", len(buttons))
 
     print("\n===================================================\n")
 
@@ -1189,7 +1201,7 @@ def process_rich_text(text, entities, automation):
         return None, []
 
     replacements = get_active_replacements(automation)
-    
+
     entities = process_hidden_urls(entities, replacements)
 
     processed_text, occurrences = find_replacement_occurrences(
@@ -1244,6 +1256,99 @@ async def send_log(
         await lovable_request(LOGS_ENDPOINT, "POST", payload)
     except Exception as error:
         print("[Logs] Falha:", str(error))
+
+
+# ============================================================
+# PUBLICAR COM BOTÃO
+# ============================================================
+
+async def try_publish_with_inline_buttons(
+    message,
+    destination,
+    processed_text,
+    processed_entities,
+    preserve_media,
+    preserve_caption,
+    preserve_formatting,
+    automation,
+):
+    if not automation_has_inline_buttons(automation):
+        return None
+
+    if not button_publisher.available:
+        print(
+            "[Buttons] Automação possui botões, mas o bot publicador "
+            "não está disponível. Seguindo com publicação normal sem botão."
+        )
+        return None
+
+    entities = (
+        processed_entities
+        if preserve_formatting
+        else []
+    )
+
+    if message.media and preserve_media:
+        temp_file_path = None
+        try:
+            temp_file_path = await client.download_media(message)
+
+            if temp_file_path:
+                return await button_publisher.send_file(
+                    destination_chat_id=destination,
+                    file_path=temp_file_path,
+                    caption=(processed_text if preserve_caption else ""),
+                    entities=(
+                        entities
+                        if preserve_caption
+                        else []
+                    ),
+                    automation=automation,
+                )
+
+            if processed_text:
+                return await button_publisher.send_text(
+                    destination_chat_id=destination,
+                    text=processed_text,
+                    entities=entities,
+                    automation=automation,
+                )
+
+            return None
+
+        except Exception as error:
+            print(
+                "[Buttons] Falha ao publicar mídia com botão; "
+                "fallback para fluxo atual:",
+                type(error).__name__,
+                str(error)
+            )
+            return None
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except OSError:
+                    pass
+
+    if not processed_text:
+        return None
+
+    try:
+        return await button_publisher.send_text(
+            destination_chat_id=destination,
+            text=processed_text,
+            entities=entities,
+            automation=automation,
+        )
+    except Exception as error:
+        print(
+            "[Buttons] Falha ao publicar texto com botão; "
+            "fallback para fluxo atual:",
+            type(error).__name__,
+            str(error)
+        )
+        return None
 
 
 # ============================================================
@@ -1316,39 +1421,30 @@ async def publish_single_message(
         if not destination or str(destination).strip() == str(source_id).strip():
             return
 
-        destination_entity = await resolve_destination_entity(destination)
-
         preserve_media = automation.get("preserve_media", True)
         preserve_caption = automation.get("preserve_caption", True)
         preserve_formatting = automation.get("preserve_formatting", True)
 
-        sent = None
+        sent = await try_publish_with_inline_buttons(
+            message=message,
+            destination=destination,
+            processed_text=processed_text,
+            processed_entities=processed_entities,
+            preserve_media=preserve_media,
+            preserve_caption=preserve_caption,
+            preserve_formatting=preserve_formatting,
+            automation=automation,
+        )
 
-        if message.media and preserve_media:
-            async with MEDIA_SEND_SEMAPHORE:
-                try:
-                    sent = await client.send_file(
-                        destination_entity,
-                        message.media,
-                        caption=(processed_text if preserve_caption else ""),
-                        formatting_entities=(
-                            processed_entities
-                            if preserve_caption and preserve_formatting
-                            else []
-                        )
-                    )
-                except ChatForwardsRestrictedError:
-                    print(
-                        "[Protected Media] Conteúdo restrito na origem. "
-                        "Baixando mídia temporariamente para bypass..."
-                    )
-                    temp_file_path = None
+        if sent is None:
+            destination_entity = await resolve_destination_entity(destination)
+
+            if message.media and preserve_media:
+                async with MEDIA_SEND_SEMAPHORE:
                     try:
-                        temp_file_path = await client.download_media(message)
-                        
                         sent = await client.send_file(
                             destination_entity,
-                            temp_file_path,
+                            message.media,
                             caption=(processed_text if preserve_caption else ""),
                             formatting_entities=(
                                 processed_entities
@@ -1356,34 +1452,53 @@ async def publish_single_message(
                                 else []
                             )
                         )
-                        print("[Protected Media] Envio com bypass concluído!")
-                    except Exception as download_err:
+                    except ChatForwardsRestrictedError:
                         print(
-                            "[Protected Media Error] Falha no bypass de download:",
-                            str(download_err)
+                            "[Protected Media] Conteúdo restrito na origem. "
+                            "Baixando mídia temporariamente para bypass..."
                         )
-                        sent = await client.send_message(
-                            destination_entity,
-                            processed_text or "🔒 Conteúdo protegido indisponível.",
-                            formatting_entities=(
-                                processed_entities if preserve_formatting else []
+                        temp_file_path = None
+                        try:
+                            temp_file_path = await client.download_media(message)
+
+                            sent = await client.send_file(
+                                destination_entity,
+                                temp_file_path,
+                                caption=(processed_text if preserve_caption else ""),
+                                formatting_entities=(
+                                    processed_entities
+                                    if preserve_caption and preserve_formatting
+                                    else []
+                                )
                             )
-                        )
-                    finally:
-                        if temp_file_path and os.path.exists(temp_file_path):
-                            os.remove(temp_file_path)
+                            print("[Protected Media] Envio com bypass concluído!")
+                        except Exception as download_err:
+                            print(
+                                "[Protected Media Error] Falha no bypass de download:",
+                                str(download_err)
+                            )
+                            sent = await client.send_message(
+                                destination_entity,
+                                processed_text or "🔒 Conteúdo protegido indisponível.",
+                                formatting_entities=(
+                                    processed_entities if preserve_formatting else []
+                                )
+                            )
+                        finally:
+                            if temp_file_path and os.path.exists(temp_file_path):
+                                os.remove(temp_file_path)
 
-        else:
-            if not processed_text:
-                return
+            else:
+                if not processed_text:
+                    return
 
-            sent = await client.send_message(
-                destination_entity,
-                processed_text,
-                formatting_entities=(
-                    processed_entities if preserve_formatting else []
+                sent = await client.send_message(
+                    destination_entity,
+                    processed_text,
+                    formatting_entities=(
+                        processed_entities if preserve_formatting else []
+                    )
                 )
-            )
 
         if sent:
             elapsed = time.monotonic() - started_at
@@ -1446,6 +1561,13 @@ async def album_handler(event):
 
     for automation in matches:
         automation_id = automation["id"]
+
+        if automation_has_inline_buttons(automation):
+            print(
+                "[Buttons] A automação possui botões, mas álbuns do Telegram "
+                "não aceitam inline keyboard no próprio grupo de mídia. "
+                "O álbum será preservado sem botão."
+            )
 
         processing_key = (
             f"album:"
@@ -1679,17 +1801,33 @@ async def edited_message_handler(event):
 
         if processed_text is None:
             for link in links:
-                try:
-                    destination_entity = await resolve_destination_entity(
-                        link["destination_chat_id"]
-                    )
-                    await client.delete_messages(
-                        destination_entity,
-                        [int(link["destination_message_id"])],
-                        revoke=True
-                    )
-                except Exception as error:
-                    print("[Edit] Erro apagando mensagem bloqueada:", str(error))
+                deleted = False
+
+                if automation_has_inline_buttons(automation) and button_publisher.available:
+                    try:
+                        await button_publisher.delete_messages(
+                            link["destination_chat_id"],
+                            [int(link["destination_message_id"])],
+                        )
+                        deleted = True
+                    except Exception as error:
+                        print(
+                            "[Edit] Bot não conseguiu apagar mensagem bloqueada:",
+                            str(error)
+                        )
+
+                if not deleted:
+                    try:
+                        destination_entity = await resolve_destination_entity(
+                            link["destination_chat_id"]
+                        )
+                        await client.delete_messages(
+                            destination_entity,
+                            [int(link["destination_message_id"])],
+                            revoke=True
+                        )
+                    except Exception as error:
+                        print("[Edit] Erro apagando mensagem bloqueada:", str(error))
             continue
 
         preserve_caption = automation.get("preserve_caption", True)
@@ -1699,21 +1837,47 @@ async def edited_message_handler(event):
             continue
 
         for link in links:
-            try:
-                destination_entity = await resolve_destination_entity(
-                    link["destination_chat_id"]
-                )
-                destination_message_id = int(link["destination_message_id"])
+            destination_message_id = int(link["destination_message_id"])
+            edited = False
 
-                await client.edit_message(
-                    destination_entity,
-                    destination_message_id,
-                    processed_text,
-                    formatting_entities=(
-                        processed_entities if preserve_formatting else []
+            if automation_has_inline_buttons(automation) and button_publisher.available:
+                try:
+                    await button_publisher.edit_message(
+                        destination_chat_id=link["destination_chat_id"],
+                        destination_message_id=destination_message_id,
+                        text=processed_text,
+                        entities=(
+                            processed_entities if preserve_formatting else []
+                        ),
+                        automation=automation,
                     )
-                )
+                    edited = True
+                except Exception as error:
+                    print(
+                        "[Edit] Falha ao editar pelo bot; tentando sessão principal:",
+                        type(error).__name__,
+                        str(error)
+                    )
 
+            if not edited:
+                try:
+                    destination_entity = await resolve_destination_entity(
+                        link["destination_chat_id"]
+                    )
+
+                    await client.edit_message(
+                        destination_entity,
+                        destination_message_id,
+                        processed_text,
+                        formatting_entities=(
+                            processed_entities if preserve_formatting else []
+                        )
+                    )
+                    edited = True
+                except Exception as error:
+                    print("[Edit] ERRO:", type(error).__name__, str(error))
+
+            if edited:
                 await send_log(
                     automation_id=automation["id"],
                     source_message_id=message.id,
@@ -1722,8 +1886,6 @@ async def edited_message_handler(event):
                     original_text=message.message or "",
                     processed_text=processed_text
                 )
-            except Exception as error:
-                print("[Edit] ERRO:", type(error).__name__, str(error))
 
 
 # ============================================================
@@ -1736,6 +1898,13 @@ async def deleted_message_handler(event):
     if source_id is None:
         return
 
+    automations = await load_automations()
+    automations_by_id = {
+        str(automation.get("id")): automation
+        for automation in automations
+        if automation.get("id") is not None
+    }
+
     for source_message_id in event.deleted_ids:
         links = await find_message_links(
             source_chat_id=source_id,
@@ -1745,26 +1914,43 @@ async def deleted_message_handler(event):
         if not links:
             continue
 
-        grouped_destinations = defaultdict(list)
         for link in links:
-            grouped_destinations[str(link["destination_chat_id"])].append(
-                int(link["destination_message_id"])
-            )
+            destination_chat_id = str(link["destination_chat_id"])
+            destination_message_id = int(link["destination_message_id"])
+            automation = automations_by_id.get(str(link.get("automation_id")))
+            deleted = False
 
-        for destination_chat_id, destination_ids in grouped_destinations.items():
-            try:
-                destination_entity = await resolve_destination_entity(
-                    destination_chat_id
-                )
-                await client.delete_messages(
-                    destination_entity,
-                    destination_ids,
-                    revoke=True
-                )
-            except Exception as error:
-                print("[Delete] ERRO:", type(error).__name__, str(error))
+            if (
+                automation
+                and automation_has_inline_buttons(automation)
+                and button_publisher.available
+            ):
+                try:
+                    await button_publisher.delete_messages(
+                        destination_chat_id,
+                        [destination_message_id],
+                    )
+                    deleted = True
+                except Exception as error:
+                    print(
+                        "[Delete] Bot não conseguiu apagar; tentando sessão principal:",
+                        type(error).__name__,
+                        str(error)
+                    )
 
-        for link in links:
+            if not deleted:
+                try:
+                    destination_entity = await resolve_destination_entity(
+                        destination_chat_id
+                    )
+                    await client.delete_messages(
+                        destination_entity,
+                        [destination_message_id],
+                        revoke=True
+                    )
+                except Exception as error:
+                    print("[Delete] ERRO:", type(error).__name__, str(error))
+
             await send_log(
                 automation_id=link["automation_id"],
                 source_message_id=source_message_id,
@@ -1962,6 +2148,7 @@ async def main():
     print("[Telegram] Conectado! User ID:", me.id)
 
     await warm_entity_cache()
+    await button_publisher.start()
 
     try:
         automations = await load_automations(force_refresh=True)
@@ -1985,12 +2172,13 @@ async def main():
     asyncio.create_task(cache_maintenance_loop())
     asyncio.create_task(source_recovery_loop())
 
-    print("[Worker] ONLINE com Bypass e Correção de Entidades Ativa")
+    print("[Worker] ONLINE com Bypass, Entidades e Botões Inline")
     print("=================================")
 
     try:
         await client.run_until_disconnected()
     finally:
+        await button_publisher.close()
         await close_http_client()
 
 
