@@ -1,8 +1,11 @@
 import os
 from collections import defaultdict, OrderedDict
 
+from dotenv import load_dotenv
 from telethon import TelegramClient, Button
 
+
+load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 BOT_SESSION_NAME = os.getenv(
