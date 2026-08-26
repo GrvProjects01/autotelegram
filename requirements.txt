@@ -1,3 +1,5 @@
 telethon
 httpx
 python-dotenv
+hachoir
+Pillow
