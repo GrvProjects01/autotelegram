@@ -1,87 +1,110 @@
-# Prompt para o Lovable — Botões inline por automação
+# Prompt para o Lovable — Botões inline + múltiplos bots publicadores
 
-Quero adicionar suporte a botões inline do Telegram DENTRO da tela atual de criação/edição de automações. Não crie uma página ou módulo separado de botões.
+Quero evoluir a tela atual de criação/edição de automações para suportar botões inline do Telegram e seleção de um bot publicador por automação. Não quebre nenhuma funcionalidade existente.
 
-## Contexto do sistema atual
+## Contexto
 
-A automação já possui seleção de canal/grupo fonte, canal/grupo destino, replacements, blacklist e opções de preservação de mídia/caption/formatação. O worker externo consulta as automações pelo endpoint existente:
+O worker externo continua usando a sessão Telegram atual para LER as fontes, aplicar blacklist/replacements, recovery e demais regras. Para mensagens com botão inline, a publicação pode ser feita por um bot Telegram.
 
-`GET /api/public/worker/automations`
+O worker agora suporta VÁRIOS bots configurados privadamente na AWS. O Lovable NÃO deve armazenar nem receber os tokens dos bots. O painel deve trabalhar apenas com uma chave pública estável do bot, por exemplo `north`, `marca_b`, `grupo_vip`.
 
-Não altere nem quebre nenhuma funcionalidade existente. Esta mudança deve ser retrocompatível: automações sem botão devem continuar retornando e funcionando exatamente como hoje.
+Tokens são segredo de infraestrutura e ficam somente no ambiente da AWS em `TELEGRAM_BOTS_JSON`.
 
-## Objetivo
+## 1. Cadastro lógico de bots no Lovable
 
-Na MESMA tela/formulário de criar e editar automação, abaixo das configurações existentes (preferencialmente depois de Replacements/Blacklist), criar uma seção chamada **Botões da mensagem**.
+Criar uma área simples chamada **Bots publicadores**.
 
-A seção deve ter:
-
-- Toggle: `Adicionar botão à mensagem`.
-- Quando desligado, nenhum botão é salvo/aplicado.
-- Quando ligado, permitir cadastrar um ou mais botões.
-- Cada botão deve ter:
-  - `Texto do botão` (obrigatório, máximo razoável de UI, ex. 64 caracteres).
-  - `URL` (obrigatória; aceitar apenas URLs válidas `http://`, `https://` ou `tg://`).
-  - `Linha` / organização visual. Por padrão, cada botão deve ficar em uma linha. Opcionalmente permitir posicionar dois ou mais na mesma linha.
-  - `Ordem`.
-  - `Ativo`.
-- Botão `+ Adicionar outro botão`.
-- Possibilidade de remover um botão antes de salvar.
-- Mostrar uma prévia simples do teclado inline.
-
-Exemplo visual:
-
-Botões da mensagem
-[✓] Adicionar botão
-
-Botão 1
-Texto: [🔥 ACESSAR AGORA]
-URL:   [https://site.com/oferta]
-Linha: [1]
-
-[+ Adicionar outro botão]
-
-## Persistência
-
-Primeiro inspecione a modelagem atual das automações, replacements e blacklist e siga o MESMO padrão arquitetural do projeto.
-
-Preferência: se replacements/blacklist usam tabelas relacionadas, criar uma tabela relacionada `automation_buttons`. Se o projeto já armazena configurações compostas em JSON/JSONB, pode seguir o padrão existente. NÃO faça migração destrutiva.
-
-Se usar tabela relacionada, estrutura sugerida:
-
+Cada bot cadastrado no Lovable deve guardar apenas:
 - `id`
-- `automation_id` — FK para a automação
-- `text`
-- `url`
-- `row_index` — inteiro, default 0
-- `sort_order` — inteiro, default 0
-- `enabled` — boolean, default true
+- `key` — slug/chave única e imutável após uso, ex.: `north`, `marca_b`
+- `name` — nome amigável, ex.: `North Finance Bot`
+- `telegram_username` — opcional, ex.: `@northfinance_bot`
+- `enabled` — boolean
 - timestamps conforme padrão do projeto
 
-Garanta cascade/delete consistente com as outras relações da automação e RLS/policies coerentes com o projeto existente.
+NUNCA criar coluna para token. NUNCA pedir token no frontend. NUNCA devolver token em API.
 
-## CRUD da automação
+Sugestão de tabela: `telegram_publisher_bots`.
 
-Estenda o fluxo ATUAL de criar/editar automação para salvar os botões no mesmo submit da tarefa.
+Validações:
+- `key` obrigatória, única, lowercase e aceita apenas letras, números, `_`, `-` e `.`;
+- `name` obrigatório;
+- impedir exclusão de bot que esteja em uso por uma automação sem antes exigir troca/remover vínculo;
+- permitir ativar/desativar.
 
-Ao editar uma automação:
-- carregar os botões já cadastrados;
-- permitir adicionar, alterar, ordenar, ativar/desativar e remover;
-- não afetar source, destination, replacements, blacklist nem demais campos.
+UI exemplo:
 
-Ao duplicar/clonar uma automação, caso o sistema já possua essa ação, duplicar também os botões.
+Bots publicadores
+- North Finance Bot — chave `north` — ativo
+- Marca B Bot — chave `marca_b` — ativo
+[+ Adicionar bot]
 
-## Endpoint do worker
+Ao adicionar um bot, mostrar aviso:
+`A chave deste bot deve existir com o mesmo valor em TELEGRAM_BOTS_JSON no worker da AWS. O token fica somente na AWS e nunca é salvo no Lovable.`
 
-O endpoint existente `GET /api/public/worker/automations` precisa passar a incluir um array `buttons` em CADA automação, sem remover nenhum campo atual.
+## 2. Seleção do bot dentro da automação
 
-Formato obrigatório para o worker:
+Na MESMA tela de criar/editar automação, adicionar um campo:
+
+**Bot publicador**
+[ selecionar bot ▼ ]
+
+Listar somente bots ativos da tabela `telegram_publisher_bots`.
+
+Persistir na automação o campo `telegram_bot_key` usando a `key` pública do bot, NÃO o token.
+
+Exemplo:
+```json
+"telegram_bot_key": "north"
+```
+
+Quando houver mais de um bot ativo e a automação tiver botões habilitados, tornar a seleção do bot obrigatória.
+
+Ao editar uma automação, carregar o bot já selecionado.
+Ao duplicar/clonar, duplicar também `telegram_bot_key`.
+
+## 3. Botões inline
+
+Na MESMA tela/formulário, criar seção **Botões da mensagem**.
+
+- Toggle `Adicionar botão à mensagem`;
+- um ou mais botões;
+- `Texto do botão` obrigatório;
+- `URL` obrigatória com `http://`, `https://` ou `tg://`;
+- `Linha` / `row`;
+- `Ordem` / `sort_order`;
+- `Ativo`;
+- botão `+ Adicionar outro botão`;
+- remover botão;
+- prévia simples opcional.
+
+Se usar tabela relacionada, sugestão `automation_buttons`:
+- id
+- automation_id
+- text
+- url
+- row_index
+- sort_order
+- enabled
+- timestamps
+
+Siga o mesmo padrão arquitetural já usado por replacements/blacklist. Se o projeto usa JSON/JSONB para configurações compostas, pode seguir esse padrão. Não faça migração destrutiva.
+
+## 4. Endpoint existente do worker
+
+Não renomear nem alterar autenticação de:
+`GET /api/public/worker/automations`
+
+Continuar usando `x-worker-secret`.
+
+Cada automação deve incluir, além de TODOS os campos atuais:
 
 ```json
 {
   "id": "automation-id",
   "source_chat_id": "-100111",
   "destination_chat_id": "-100222",
+  "telegram_bot_key": "north",
   "replacements": [],
   "blacklist": [],
   "buttons": [
@@ -97,57 +120,50 @@ Formato obrigatório para o worker:
 }
 ```
 
-Para automações sem botões, retornar obrigatoriamente:
-
+Para automações sem botões:
 ```json
 "buttons": []
 ```
 
-Aceite internamente `row_index`, mas normalize a resposta do worker para a propriedade `row`.
+Aceite `row_index` internamente, mas normalize o payload do worker para `row`.
+Ordenar por `row` e depois `sort_order`.
 
-Ordenar os botões por `row` e depois por `sort_order`.
+## 5. Compatibilidade
 
-## Validações
+Não alterar:
+- source/destination;
+- replacements;
+- blacklist;
+- preserve_media;
+- preserve_caption;
+- preserve_formatting;
+- message links;
+- autenticação do worker;
+- demais fluxos existentes.
 
-- Não permitir botão sem texto.
-- Não permitir botão sem URL.
-- Validar protocolo da URL (`http`, `https`, `tg`).
-- Não salvar linhas vazias.
-- Sanitizar/trimar texto e URL.
-- Um erro nos botões não pode apagar replacements ou outras configurações da automação.
+Automações antigas sem botões precisam continuar funcionando normalmente.
 
-## Aviso de compatibilidade com Telegram
+## 6. Avisos na UI
 
-Exibir um aviso pequeno na seção:
+Mostrar próximo ao seletor de bot:
+`O bot selecionado deve estar cadastrado na AWS com a mesma chave e ser administrador do canal de destino com permissão para publicar mensagens.`
 
-`Botões inline são aplicados a mensagens únicas (texto, foto, vídeo ou arquivo). Álbuns/grupos de mídia do Telegram não suportam teclado inline no próprio álbum.`
+Mostrar na área de botões:
+`Botões inline são aplicados a mensagens únicas (texto, foto, vídeo ou arquivo). Álbuns/grupos de mídia do Telegram não suportam teclado inline diretamente no próprio álbum.`
 
-Também exibir:
+## 7. Resultado esperado
 
-`Para publicar botões, o bot configurado no worker precisa ser administrador do canal de destino com permissão para publicar mensagens.`
+Depois da alteração eu devo conseguir:
+1. cadastrar no Lovable `North Finance Bot` com chave `north`;
+2. cadastrar `Marca B Bot` com chave `marca_b`;
+3. abrir Nova Automação;
+4. escolher fonte/destino normalmente;
+5. escolher `North Finance Bot` no campo Bot publicador;
+6. configurar replacements/blacklist normalmente;
+7. habilitar botão inline e informar texto/URL;
+8. salvar;
+9. o endpoint do worker devolver `telegram_bot_key: "north"` e o array `buttons`;
+10. o worker AWS usar o token privado correspondente à chave `north`;
+11. outra automação poder escolher `marca_b` sem afetar a primeira.
 
-## Backend/API
-
-Atualize todos os tipos/interfaces/schemas/serializers necessários para que `buttons` faça parte da automação sem quebrar clientes antigos.
-
-Não renomeie endpoints existentes.
-Não altere autenticação do worker (`x-worker-secret`).
-Não remova campos existentes.
-Não altere a lógica de replacements/blacklist.
-Não altere a forma de seleção de source/destination.
-
-## Resultado esperado
-
-Depois desta alteração eu devo conseguir:
-
-1. Abrir `Nova Automação`.
-2. Selecionar fonte e destino como já faço hoje.
-3. Cadastrar replacements/blacklist como já faço hoje.
-4. Na mesma página ativar `Adicionar botão à mensagem`.
-5. Informar texto e URL.
-6. Salvar a automação uma única vez.
-7. Editar depois e ver os mesmos botões cadastrados.
-8. O endpoint `/api/public/worker/automations` devolver esses botões dentro da automação.
-9. Automações antigas sem botão continuarem funcionando normalmente.
-
-Implemente a funcionalidade completa no frontend e backend do projeto Lovable, incluindo persistência/migração quando necessária. Antes de alterar, inspecione o código existente e reutilize os componentes, padrões visuais e padrões de dados já adotados pelo projeto. Não recrie telas desnecessariamente e não faça refatoração ampla fora do escopo.
+Implemente frontend, backend, tipos/interfaces, persistência, migrações e validações necessárias, reutilizando os padrões visuais e arquiteturais atuais. Não faça refatoração ampla fora do escopo.
