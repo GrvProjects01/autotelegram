@@ -56,9 +56,14 @@ async def load_session_automations(force_refresh=False):
                 filtered.append(automation)
             continue
 
-        # Apenas a sessão marcada como padrão herda tarefas antigas sem chave.
         if IS_DEFAULT:
             filtered.append(automation)
+
+    if force_refresh:
+        print(
+            f"[Session:{SESSION_KEY}] automações desta sessão: "
+            f"{len(filtered)}/{len(automations)}"
+        )
 
     return filtered
 
@@ -79,9 +84,21 @@ async def session_lovable_request(path, method="GET", data=None):
             payload["telegram_session_is_default"] = IS_DEFAULT
 
             try:
-                payload["publisher_bots"] = worker.button_publisher.public_bots()
+                publisher_bots = worker.button_publisher.public_bots()
             except Exception:
-                payload["publisher_bots"] = []
+                publisher_bots = []
+
+            payload["publisher_bots"] = publisher_bots
+
+            print(
+                f"[Session:{SESSION_KEY}] heartbeat -> bots públicos: "
+                f"{len(publisher_bots)}"
+            )
+            if publisher_bots:
+                print(
+                    f"[Session:{SESSION_KEY}] bot keys: "
+                    + ", ".join(str(item.get("key")) for item in publisher_bots)
+                )
 
         elif path == worker.CHATS_SYNC_ENDPOINT and method == "POST":
             payload["telegram_session_key"] = SESSION_KEY
@@ -99,15 +116,17 @@ async def session_lovable_request(path, method="GET", data=None):
 
             payload["chats"] = normalized_chats
 
+            print(
+                f"[Session:{SESSION_KEY}] enviando chats ao Lovable: "
+                f"{len(normalized_chats)}"
+            )
+
     return await _original_lovable_request(path, method, payload)
 
 
-# Substitui somente as bordas necessárias. Handlers, replaces, blacklist,
-# recovery, botões, mídia, logs e message-links continuam no worker.py.
 worker.load_automations = load_session_automations
 worker.lovable_request = session_lovable_request
 
-# Evita colisão entre locks/cache de recuperação de duas sessões no mesmo EC2.
 base_worker_id = str(worker.WORKER_ID or "telegram-main")
 if not base_worker_id.endswith(f"-{SESSION_KEY}"):
     worker.WORKER_ID = f"{base_worker_id}-{SESSION_KEY}"
