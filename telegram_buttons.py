@@ -307,6 +307,26 @@ class TelegramButtonPublisher:
         )
 
     @staticmethod
+    def normalize_style(value):
+        raw = str(value or "").strip().lower()
+        aliases = {
+            "blue": "primary",
+            "azul": "primary",
+            "primary": "primary",
+            "green": "success",
+            "verde": "success",
+            "success": "success",
+            "red": "danger",
+            "vermelho": "danger",
+            "danger": "danger",
+            "default": None,
+            "neutral": None,
+            "neutro": None,
+            "": None,
+        }
+        return aliases.get(raw)
+
+    @staticmethod
     def normalize_buttons(automation):
         raw_buttons = automation.get("buttons", []) or []
         normalized = []
@@ -336,11 +356,16 @@ class TelegramButtonPublisher:
             except (TypeError, ValueError):
                 sort_order = index
 
+            style = TelegramButtonPublisher.normalize_style(
+                item.get("style") or item.get("color")
+            )
+
             normalized.append({
                 "text": text,
                 "url": url,
                 "row": max(0, row),
                 "sort_order": sort_order,
+                "style": style,
             })
 
         normalized.sort(key=lambda button: (button["row"], button["sort_order"]))
@@ -354,7 +379,13 @@ class TelegramButtonPublisher:
 
         rows = defaultdict(list)
         for button in normalized:
-            rows[button["row"]].append(Button.url(button["text"], button["url"]))
+            rows[button["row"]].append(
+                Button.url(
+                    button["text"],
+                    button["url"],
+                    style=button.get("style"),
+                )
+            )
 
         return [rows[row] for row in sorted(rows.keys())]
 
