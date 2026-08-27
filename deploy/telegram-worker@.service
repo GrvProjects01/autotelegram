@@ -1,0 +1,20 @@
+[Unit]
+Description=Telegram Automation Worker - session %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/autotelegram/autotelegram
+EnvironmentFile=/home/ubuntu/autotelegram/autotelegram/.env
+EnvironmentFile=/home/ubuntu/autotelegram/autotelegram/sessions/%i.env
+ExecStart=/home/ubuntu/autotelegram/autotelegram/venv/bin/python /home/ubuntu/autotelegram/autotelegram/session_worker.py
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
