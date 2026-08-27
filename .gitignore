@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+sessions/*.env
+bot_sessions/
 *.session
 *.session-journal
 __pycache__/
@@ -8,3 +10,4 @@ __pycache__/
 venv/
 .venv/
 source_recovery_state.json
+source_recovery_state_*.json
