@@ -27,6 +27,7 @@ IS_DEFAULT = str(os.getenv("TELEGRAM_SESSION_IS_DEFAULT", "0")).strip() == "1"
 import worker  # noqa: E402
 
 _original_load_automations = worker.load_automations
+_original_lovable_request = worker.lovable_request
 
 
 def automation_session_key(automation):
@@ -56,16 +57,55 @@ async def load_session_automations(force_refresh=False):
             continue
 
         # Apenas a sessão marcada como padrão herda tarefas antigas sem chave.
-        # Isso evita duplicidade quando existem dois ou mais workers ativos.
         if IS_DEFAULT:
             filtered.append(automation)
 
     return filtered
 
 
-# Substitui somente a fonte das automações. Todos os handlers, replaces,
-# blacklist, recovery, botões, mídia, logs e message-links continuam no worker.py.
+async def session_lovable_request(path, method="GET", data=None):
+    """Acrescenta identidade da sessão sem alterar endpoints existentes.
+
+    Heartbeat recebe também a lista PÚBLICA de bots configurados no worker.
+    Nenhum token é enviado ao Lovable.
+    """
+    payload = data
+
+    if isinstance(data, dict):
+        payload = dict(data)
+
+        if path == worker.HEARTBEAT_ENDPOINT and method == "POST":
+            payload["telegram_session_key"] = SESSION_KEY
+            payload["telegram_session_is_default"] = IS_DEFAULT
+
+            try:
+                payload["publisher_bots"] = worker.button_publisher.public_bots()
+            except Exception:
+                payload["publisher_bots"] = []
+
+        elif path == worker.CHATS_SYNC_ENDPOINT and method == "POST":
+            payload["telegram_session_key"] = SESSION_KEY
+
+            chats = payload.get("chats", []) or []
+            normalized_chats = []
+
+            for chat in chats:
+                if isinstance(chat, dict):
+                    item = dict(chat)
+                    item["telegram_session_key"] = SESSION_KEY
+                    normalized_chats.append(item)
+                else:
+                    normalized_chats.append(chat)
+
+            payload["chats"] = normalized_chats
+
+    return await _original_lovable_request(path, method, payload)
+
+
+# Substitui somente as bordas necessárias. Handlers, replaces, blacklist,
+# recovery, botões, mídia, logs e message-links continuam no worker.py.
 worker.load_automations = load_session_automations
+worker.lovable_request = session_lovable_request
 
 # Evita colisão entre locks/cache de recuperação de duas sessões no mesmo EC2.
 base_worker_id = str(worker.WORKER_ID or "telegram-main")
