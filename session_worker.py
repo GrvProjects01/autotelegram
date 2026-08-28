@@ -28,6 +28,7 @@ import worker  # noqa: E402
 
 _original_load_automations = worker.load_automations
 _original_lovable_request = worker.lovable_request
+_original_process_rich_text = worker.process_rich_text
 
 
 def automation_session_key(automation):
@@ -66,6 +67,115 @@ async def load_session_automations(force_refresh=False):
         )
 
     return filtered
+
+
+def _utf16_slice(text, offset, length):
+    """Extrai o trecho apontado por uma entity do Telegram (offset UTF-16)."""
+    if not text or length <= 0:
+        return ""
+
+    raw = text.encode("utf-16-le")
+    start = max(0, int(offset)) * 2
+    end = max(start, int(offset + length)) * 2
+    return raw[start:end].decode("utf-16-le", errors="ignore")
+
+
+def _link_from_replaced_visible_text(value):
+    """Infere um destino seguro quando o texto substituído virou URL/@username."""
+    value = str(value or "").strip()
+
+    if re.match(r"^https?://", value, flags=re.IGNORECASE):
+        return value
+
+    if re.match(r"^(?:https?://)?t\.me/[A-Za-z0-9_+\-/]+$", value, flags=re.IGNORECASE):
+        if value.lower().startswith(("http://", "https://")):
+            return value
+        return "https://" + value
+
+    if re.match(r"^@[A-Za-z0-9_]{5,}$", value):
+        return "https://t.me/" + value[1:]
+
+    return None
+
+
+def session_process_rich_text(text, entities, automation):
+    """Evita reaproveitar hyperlink oculto antigo quando o texto ligado foi trocado.
+
+    Telegram pode guardar uma URL em MessageEntityTextUrl mesmo quando a mensagem
+    mostra apenas uma palavra/frase. Se um Replace altera essa palavra mas não a URL
+    escondida, republicar a entity preserva o link do canal de origem. Aqui:
+    - Replace explícito que também casa com a URL continua funcionando normalmente;
+    - se o texto clicável vira uma URL ou @username, a entity aponta para o novo alvo;
+    - se o texto clicável foi alterado mas não define novo alvo, removemos só a entity
+      de hyperlink, preservando o texto e as demais formatações.
+    """
+    original_entities = entities or []
+    replacements = worker.get_active_replacements(automation)
+    stale_urls = set()
+    inferred_urls = {}
+
+    for entity in original_entities:
+        if not isinstance(entity, worker.MessageEntityTextUrl):
+            continue
+
+        old_url = str(getattr(entity, "url", "") or "")
+        if not old_url:
+            continue
+
+        # Se a regra já altera a própria URL oculta, o worker base cuida dela.
+        replaced_url = worker.replace_value(old_url, replacements)
+        if replaced_url != old_url:
+            continue
+
+        linked_text = _utf16_slice(
+            text or "",
+            getattr(entity, "offset", 0),
+            getattr(entity, "length", 0),
+        )
+        replaced_linked_text = worker.replace_value(linked_text, replacements)
+
+        if replaced_linked_text == linked_text:
+            continue
+
+        inferred_url = _link_from_replaced_visible_text(replaced_linked_text)
+        if inferred_url:
+            inferred_urls[old_url] = inferred_url
+        else:
+            stale_urls.add(old_url)
+
+    processed_text, processed_entities = _original_process_rich_text(
+        text,
+        entities,
+        automation,
+    )
+
+    if processed_text is None or not processed_entities:
+        return processed_text, processed_entities
+
+    sanitized_entities = []
+    removed = 0
+    rewritten = 0
+
+    for entity in processed_entities:
+        if isinstance(entity, worker.MessageEntityTextUrl):
+            current_url = str(getattr(entity, "url", "") or "")
+
+            if current_url in inferred_urls:
+                entity.url = inferred_urls[current_url]
+                rewritten += 1
+            elif current_url in stale_urls:
+                removed += 1
+                continue
+
+        sanitized_entities.append(entity)
+
+    if removed or rewritten:
+        print(
+            f"[Links:{SESSION_KEY}] hyperlinks ocultos sanitizados: "
+            f"removidos={removed} reescritos={rewritten}"
+        )
+
+    return processed_text, sanitized_entities
 
 
 async def session_lovable_request(path, method="GET", data=None):
@@ -126,6 +236,7 @@ async def session_lovable_request(path, method="GET", data=None):
 
 worker.load_automations = load_session_automations
 worker.lovable_request = session_lovable_request
+worker.process_rich_text = session_process_rich_text
 
 base_worker_id = str(worker.WORKER_ID or "telegram-main")
 if not base_worker_id.endswith(f"-{SESSION_KEY}"):
