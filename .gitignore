@@ -11,3 +11,4 @@ venv/
 .venv/
 source_recovery_state.json
 source_recovery_state_*.json
+button_rotation_state_*.json
