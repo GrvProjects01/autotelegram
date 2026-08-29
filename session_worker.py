@@ -13,6 +13,8 @@ Compatibilidade:
 import asyncio
 import os
 import re
+import shutil
+import tempfile
 
 from dotenv import load_dotenv
 
@@ -21,6 +23,9 @@ load_dotenv()
 SESSION_KEY = str(os.getenv("TELEGRAM_SESSION_KEY", "primary")).strip().lower()
 SESSION_KEY = re.sub(r"[^a-z0-9_.-]+", "_", SESSION_KEY).strip("_.-") or "primary"
 IS_DEFAULT = str(os.getenv("TELEGRAM_SESSION_IS_DEFAULT", "0")).strip() == "1"
+FORCE_MEDIA_REUPLOAD = str(
+    os.getenv("TELEGRAM_FORCE_MEDIA_REUPLOAD", "1")
+).strip().lower() not in {"0", "false", "no", "off"}
 
 # Importar depois de carregar o ambiente é intencional: worker.py lê as variáveis
 # de sessão no import e cria o TelegramClient correspondente.
@@ -29,6 +34,7 @@ import worker  # noqa: E402
 _original_load_automations = worker.load_automations
 _original_lovable_request = worker.lovable_request
 _original_process_rich_text = worker.process_rich_text
+_original_client_send_file = worker.client.send_file
 
 
 def automation_session_key(automation):
@@ -99,20 +105,17 @@ def _link_from_replaced_visible_text(value):
 
 
 def session_process_rich_text(text, entities, automation):
-    """Evita reaproveitar hyperlink oculto antigo quando o texto ligado foi trocado.
-
-    Telegram pode guardar uma URL em MessageEntityTextUrl mesmo quando a mensagem
-    mostra apenas uma palavra/frase. Se um Replace altera essa palavra mas não a URL
-    escondida, republicar a entity preserva o link do canal de origem. Aqui:
-    - Replace explícito que também casa com a URL continua funcionando normalmente;
-    - se o texto clicável vira uma URL ou @username, a entity aponta para o novo alvo;
-    - se o texto clicável foi alterado mas não define novo alvo, removemos só a entity
-      de hyperlink, preservando o texto e as demais formatações.
-    """
+    """Evita reaproveitar hyperlink oculto antigo quando o texto ligado foi trocado."""
     original_entities = entities or []
     replacements = worker.get_active_replacements(automation)
     stale_urls = set()
     inferred_urls = {}
+
+    # Diagnóstico seguro: mostra somente quantas regras estão ativas.
+    if replacements:
+        print(
+            f"[Replace:{SESSION_KEY}] regras ativas: {len(replacements)}"
+        )
 
     for entity in original_entities:
         if not isinstance(entity, worker.MessageEntityTextUrl):
@@ -122,7 +125,6 @@ def session_process_rich_text(text, entities, automation):
         if not old_url:
             continue
 
-        # Se a regra já altera a própria URL oculta, o worker base cuida dela.
         replaced_url = worker.replace_value(old_url, replacements)
         if replaced_url != old_url:
             continue
@@ -149,7 +151,15 @@ def session_process_rich_text(text, entities, automation):
         automation,
     )
 
-    if processed_text is None or not processed_entities:
+    if processed_text is None:
+        return processed_text, processed_entities
+
+    if replacements and processed_text == (text or ""):
+        print(
+            f"[Replace:{SESSION_KEY}] nenhuma regra alterou o texto visível desta mensagem"
+        )
+
+    if not processed_entities:
         return processed_text, processed_entities
 
     sanitized_entities = []
@@ -178,12 +188,81 @@ def session_process_rich_text(text, entities, automation):
     return processed_text, sanitized_entities
 
 
-async def session_lovable_request(path, method="GET", data=None):
-    """Acrescenta identidade da sessão sem alterar endpoints existentes.
+def _is_raw_telegram_media(value):
+    if value is None:
+        return False
+    cls = type(value)
+    return (
+        cls.__module__.startswith("telethon.tl.types")
+        and cls.__name__.startswith("MessageMedia")
+    )
 
-    Heartbeat recebe também a lista PÚBLICA de bots configurados no worker.
-    Nenhum token é enviado ao Lovable.
+
+async def _download_media_checked(media, temp_dir, index=0):
+    path = await worker.client.download_media(media, file=temp_dir)
+    if not path:
+        raise RuntimeError("download_media retornou caminho vazio")
+
+    path = os.fspath(path)
+    if not os.path.exists(path):
+        raise RuntimeError(f"arquivo baixado não existe: {path}")
+
+    size = os.path.getsize(path)
+    if size <= 0:
+        raise RuntimeError(f"arquivo baixado está vazio: {path}")
+
+    print(
+        f"[Media:{SESSION_KEY}] download completo #{index + 1}: "
+        f"{size} bytes"
+    )
+    return path
+
+
+async def session_send_file(entity, file, *args, **kwargs):
+    """Força download + reupload para mídia crua do Telegram.
+
+    O worker antigo reaproveitava MessageMedia diretamente. Isso é rápido, mas pode
+    reproduzir mídia incompleta/estranha em alguns chats. Para caminhos locais,
+    streams e arquivos já baixados, o comportamento original permanece intacto.
     """
+    if not FORCE_MEDIA_REUPLOAD:
+        return await _original_client_send_file(entity, file, *args, **kwargs)
+
+    is_album = isinstance(file, (list, tuple))
+    items = list(file) if is_album else [file]
+
+    if not items or not any(_is_raw_telegram_media(item) for item in items):
+        return await _original_client_send_file(entity, file, *args, **kwargs)
+
+    temp_dir = tempfile.mkdtemp(prefix=f"tg_media_{SESSION_KEY}_")
+    prepared = []
+
+    try:
+        for index, item in enumerate(items):
+            if _is_raw_telegram_media(item):
+                prepared.append(
+                    await _download_media_checked(item, temp_dir, index=index)
+                )
+            else:
+                prepared.append(item)
+
+        payload = prepared if is_album else prepared[0]
+        print(
+            f"[Media:{SESSION_KEY}] reupload robusto: "
+            f"{len(prepared)} arquivo(s)"
+        )
+        return await _original_client_send_file(
+            entity,
+            payload,
+            *args,
+            **kwargs,
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def session_lovable_request(path, method="GET", data=None):
+    """Acrescenta identidade da sessão sem alterar endpoints existentes."""
     payload = data
 
     if isinstance(data, dict):
@@ -237,6 +316,7 @@ async def session_lovable_request(path, method="GET", data=None):
 worker.load_automations = load_session_automations
 worker.lovable_request = session_lovable_request
 worker.process_rich_text = session_process_rich_text
+worker.client.send_file = session_send_file
 
 base_worker_id = str(worker.WORKER_ID or "telegram-main")
 if not base_worker_id.endswith(f"-{SESSION_KEY}"):
@@ -255,6 +335,7 @@ async def main():
     print(f" SESSION KEY: {SESSION_KEY}")
     print(f" SESSION NAME: {worker.SESSION_NAME}")
     print(f" DEFAULT: {IS_DEFAULT}")
+    print(f" FORCE MEDIA REUPLOAD: {FORCE_MEDIA_REUPLOAD}")
     print("=================================")
     await worker.main()
 
