@@ -1,6 +1,8 @@
 """Entrypoint do worker multi-sessão com backfill histórico programado.
 
 Mantém session_worker.py intacto e adiciona somente a camada opcional de histórico.
+Também corrige a ordem da rotação de botões para que `sort_order` defina os
+pares/grupos e `row` seja usado apenas como layout visual dentro do post.
 """
 
 import asyncio
@@ -12,6 +14,61 @@ import session_worker as base
 worker = base.worker
 SESSION_KEY = base.SESSION_KEY
 _original_session_loader = base.load_session_automations
+
+
+def rotation_batch_by_sort_order(automation, cursor):
+    """Monta os grupos da rotação sem deixar `row` alterar a sequência.
+
+    telegram_buttons.normalize_buttons() mantém `sort_order` e `row`, porém a
+    normalização base ordena primeiro por row para montar teclados fixos. Isso é
+    correto para layout, mas não para decidir quais botões pertencem a cada grupo
+    de rotação. Aqui reordenamos explicitamente por sort_order antes de fatiar.
+    """
+    buttons = worker.button_publisher.normalize_buttons(automation)
+    if not buttons:
+        return [], 0
+
+    def rotation_order(item):
+        try:
+            sort_order = int(item.get("sort_order", 0))
+        except (TypeError, ValueError):
+            sort_order = 0
+
+        try:
+            row = int(item.get("row", 0))
+        except (TypeError, ValueError):
+            row = 0
+
+        # row entra apenas como desempate determinístico; nunca como prioridade.
+        return (sort_order, row)
+
+    buttons = sorted(buttons, key=rotation_order)
+
+    size = base._button_rotation_size(automation)
+    groups = [
+        buttons[index:index + size]
+        for index in range(0, len(buttons), size)
+    ]
+
+    if not groups:
+        return [], 0
+
+    group_index = int(cursor or 0) % len(groups)
+    next_cursor = (group_index + 1) % len(groups)
+
+    selected = groups[group_index]
+    print(
+        f"[Buttons Rotation:{SESSION_KEY}] grupo={group_index} "
+        f"ordens={[item.get('sort_order') for item in selected]} "
+        f"rows={[item.get('row') for item in selected]}"
+    )
+
+    return selected, next_cursor
+
+
+# Patch pequeno e isolado: apenas a escolha do grupo da rotação muda.
+# O teclado continua sendo montado pelo código atual e respeitando row.
+base._rotation_batch = rotation_batch_by_sort_order
 
 
 async def history_aware_load_automations(force_refresh=False):
