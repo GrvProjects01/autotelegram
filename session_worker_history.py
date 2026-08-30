@@ -10,6 +10,7 @@ import asyncio
 import album_buttons_addon
 import historical_backfill
 import session_worker as base
+import single_media_buttons_addon
 
 
 worker = base.worker
@@ -84,6 +85,10 @@ worker.load_automations = history_aware_load_automations
 # Telegram não aceita keyboard inline diretamente em media groups.
 # O addon preserva o álbum e envia um CTA separado com o mesmo bot/rotação.
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
+
+# Se o envio de uma única mídia + botão falhar, o fluxo normal entrega a mídia
+# e este addon garante um CTA separado com os botões em vez de deixar o post sem CTA.
+single_media_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 
 
 async def main():
