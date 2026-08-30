@@ -7,6 +7,7 @@ pares/grupos e `row` seja usado apenas como layout visual dentro do post.
 
 import asyncio
 
+import album_buttons_addon
 import historical_backfill
 import session_worker as base
 
@@ -17,13 +18,7 @@ _original_session_loader = base.load_session_automations
 
 
 def rotation_batch_by_sort_order(automation, cursor):
-    """Monta os grupos da rotação sem deixar `row` alterar a sequência.
-
-    telegram_buttons.normalize_buttons() mantém `sort_order` e `row`, porém a
-    normalização base ordena primeiro por row para montar teclados fixos. Isso é
-    correto para layout, mas não para decidir quais botões pertencem a cada grupo
-    de rotação. Aqui reordenamos explicitamente por sort_order antes de fatiar.
-    """
+    """Monta os grupos da rotação sem deixar `row` alterar a sequência."""
     buttons = worker.button_publisher.normalize_buttons(automation)
     if not buttons:
         return [], 0
@@ -39,7 +34,6 @@ def rotation_batch_by_sort_order(automation, cursor):
         except (TypeError, ValueError):
             row = 0
 
-        # row entra apenas como desempate determinístico; nunca como prioridade.
         return (sort_order, row)
 
     buttons = sorted(buttons, key=rotation_order)
@@ -67,15 +61,12 @@ def rotation_batch_by_sort_order(automation, cursor):
 
 
 # Patch pequeno e isolado: apenas a escolha do grupo da rotação muda.
-# O teclado continua sendo montado pelo código atual e respeitando row.
 base._rotation_batch = rotation_batch_by_sort_order
 
 
 async def history_aware_load_automations(force_refresh=False):
     automations = await _original_session_loader(force_refresh=force_refresh)
 
-    # Contexto local da task de backfill: quando um álbum histórico é processado,
-    # restringe o handler somente à automação responsável por aquela fila.
     only_id = historical_backfill.active_automation_id.get()
     if only_id:
         automations = [
@@ -89,6 +80,10 @@ async def history_aware_load_automations(force_refresh=False):
 
 base.load_session_automations = history_aware_load_automations
 worker.load_automations = history_aware_load_automations
+
+# Telegram não aceita keyboard inline diretamente em media groups.
+# O addon preserva o álbum e envia um CTA separado com o mesmo bot/rotação.
+album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 
 
 async def main():
