@@ -1,7 +1,7 @@
 """Entrypoint do worker multi-sessão com backfill histórico programado.
 
 Mantém session_worker.py intacto e adiciona somente camadas isoladas de histórico,
-rotação e confiabilidade de botões.
+rotação, confiabilidade de botões e rodapé de segurança.
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import album_buttons_addon
 import button_destination_health
 import button_reliability_addon
 import historical_backfill
+import message_footer_addon
 import session_worker as base
 import single_media_buttons_addon
 
@@ -77,10 +78,6 @@ async def history_aware_load_automations(force_refresh=False):
             if str(automation.get("id") or "").strip() == str(only_id).strip()
         ]
 
-    # Diagnóstico por automação/destino: não publica nada, apenas confirma se o
-    # bot selecionado está conectado e consegue resolver o canal de destino.
-    # Em refresh forçado (startup/painel atualizado) imprime todos os resultados;
-    # nos refreshes comuns limita a frequência para não poluir os logs.
     try:
         await button_destination_health.check_all(
             worker,
@@ -100,6 +97,10 @@ async def history_aware_load_automations(force_refresh=False):
 
 base.load_session_automations = history_aware_load_automations
 worker.load_automations = history_aware_load_automations
+
+# Rodapé de segurança: roda depois de Replace/blacklist e antes de qualquer envio.
+# Vale para texto puro, mídia, álbum e histórico, independentemente dos botões.
+message_footer_addon.register(worker=worker, session_key=SESSION_KEY)
 
 # Telegram não aceita keyboard inline diretamente em media groups.
 # O addon preserva o álbum e envia um CTA separado com o mesmo bot/rotação.
