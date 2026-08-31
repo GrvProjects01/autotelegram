@@ -7,6 +7,7 @@ rotação e confiabilidade de botões.
 import asyncio
 
 import album_buttons_addon
+import button_destination_health
 import button_reliability_addon
 import historical_backfill
 import session_worker as base
@@ -75,6 +76,24 @@ async def history_aware_load_automations(force_refresh=False):
             for automation in automations
             if str(automation.get("id") or "").strip() == str(only_id).strip()
         ]
+
+    # Diagnóstico por automação/destino: não publica nada, apenas confirma se o
+    # bot selecionado está conectado e consegue resolver o canal de destino.
+    # Em refresh forçado (startup/painel atualizado) imprime todos os resultados;
+    # nos refreshes comuns limita a frequência para não poluir os logs.
+    try:
+        await button_destination_health.check_all(
+            worker,
+            automations,
+            session_key=SESSION_KEY,
+            force=force_refresh,
+        )
+    except Exception as error:
+        print(
+            f"[Buttons Health:{SESSION_KEY}] falha no health-check:",
+            type(error).__name__,
+            str(error),
+        )
 
     return automations
 
