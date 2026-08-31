@@ -1,13 +1,13 @@
 """Entrypoint do worker multi-sessão com backfill histórico programado.
 
-Mantém session_worker.py intacto e adiciona somente a camada opcional de histórico.
-Também corrige a ordem da rotação de botões para que `sort_order` defina os
-pares/grupos e `row` seja usado apenas como layout visual dentro do post.
+Mantém session_worker.py intacto e adiciona somente camadas isoladas de histórico,
+rotação e confiabilidade de botões.
 """
 
 import asyncio
 
 import album_buttons_addon
+import button_reliability_addon
 import historical_backfill
 import session_worker as base
 import single_media_buttons_addon
@@ -87,8 +87,12 @@ worker.load_automations = history_aware_load_automations
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 
 # Se o envio de uma única mídia + botão falhar, o fluxo normal entrega a mídia
-# e este addon garante um CTA separado com os botões em vez de deixar o post sem CTA.
+# e este addon garante um CTA separado com os botões.
 single_media_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
+
+# Camada global: reforça o bot selecionado com reconnect + retry e cobre
+# publicações de texto puro que eventualmente caiam no fallback humano.
+button_reliability_addon.register(worker=worker, session_key=SESSION_KEY)
 
 
 async def main():
