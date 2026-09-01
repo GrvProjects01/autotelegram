@@ -1,18 +1,17 @@
-"""Entrypoint do worker multi-sessão com backfill histórico programado.
+"""Entrypoint do worker multi-sessao com backfill historico programado.
 
-Mantém session_worker.py intacto e adiciona somente camadas isoladas de histórico,
-rotação, confiabilidade de botões e rodapé de segurança.
+Mantem session_worker.py intacto e adiciona camadas isoladas de historico,
+rodape, diagnostico e roteamento estrito de publicacao.
 """
 
 import asyncio
 
 import album_buttons_addon
 import button_destination_health
-import button_reliability_addon
 import historical_backfill
 import message_footer_addon
 import session_worker as base
-import single_media_buttons_addon
+import strict_publication_router
 
 
 worker = base.worker
@@ -21,7 +20,7 @@ _original_session_loader = base.load_session_automations
 
 
 def rotation_batch_by_sort_order(automation, cursor):
-    """Monta os grupos da rotação sem deixar `row` alterar a sequência."""
+    """Monta os grupos da rotacao sem deixar `row` alterar a sequencia."""
     buttons = worker.button_publisher.normalize_buttons(automation)
     if not buttons:
         return [], 0
@@ -63,7 +62,7 @@ def rotation_batch_by_sort_order(automation, cursor):
     return selected, next_cursor
 
 
-# Patch pequeno e isolado: apenas a escolha do grupo da rotação muda.
+# sort_order escolhe o grupo; row controla apenas o layout visual.
 base._rotation_batch = rotation_batch_by_sort_order
 
 
@@ -98,21 +97,21 @@ async def history_aware_load_automations(force_refresh=False):
 base.load_session_automations = history_aware_load_automations
 worker.load_automations = history_aware_load_automations
 
-# Rodapé de segurança: roda depois de Replace/blacklist e antes de qualquer envio.
-# Vale para texto puro, mídia, álbum e histórico, independentemente dos botões.
+# Rodape de seguranca: depois de Replace/blacklist e antes do envio.
 message_footer_addon.register(worker=worker, session_key=SESSION_KEY)
 
-# Telegram não aceita keyboard inline diretamente em media groups.
-# O addon preserva o álbum e envia um CTA separado com o mesmo bot/rotação.
+# Regra central para publicacao individual:
+# com botoes -> somente bot; sem botoes -> sessao humana.
+# Tambem valida download de midia e impede erro de cursor pos-envio de gerar duplicidade.
+strict_publication_router.register(
+    worker=worker,
+    base=base,
+    session_key=SESSION_KEY,
+)
+
+# Albuns precisam de tratamento separado porque Telegram nao aceita keyboard inline
+# dentro do media group. O album e preservado e o CTA com botoes sai separado.
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
-
-# Se o envio de uma única mídia + botão falhar, o fluxo normal entrega a mídia
-# e este addon garante um CTA separado com os botões.
-single_media_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
-
-# Camada global: reforça o bot selecionado com reconnect + retry e cobre
-# publicações de texto puro que eventualmente caiam no fallback humano.
-button_reliability_addon.register(worker=worker, session_key=SESSION_KEY)
 
 
 async def main():
