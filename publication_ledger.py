@@ -9,7 +9,6 @@ Objetivos:
 
 import os
 import sqlite3
-import tempfile
 import time
 
 
@@ -139,6 +138,33 @@ def register(worker, session_key="primary"):
     original_remove = worker.remove_message_links
     original_claim_fingerprint = worker.claim_fingerprint
 
+    def immediate_local_commit(
+        automation_id,
+        source_chat_id,
+        source_message_id,
+        destination_chat_id,
+        destination_message_id,
+        source_grouped_id=None,
+    ):
+        """Commit sincronico imediatamente apos o Telegram confirmar o envio.
+
+        Nao faz HTTP. Serve para fechar a janela entre `send_message/send_file`
+        retornar sucesso e o restante do fluxo (logs/Lovable) sofrer cancelamento.
+        """
+        _local_save(
+            conn,
+            automation_id=automation_id,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            source_grouped_id=source_grouped_id,
+            destination_chat_id=destination_chat_id,
+            destination_message_id=destination_message_id,
+        )
+        print(
+            f"[Ledger:{session_key}] EARLY COMMIT source={source_message_id} "
+            f"automation={automation_id} dest={destination_message_id}"
+        )
+
     async def durable_find_message_links(
         source_chat_id,
         source_message_id,
@@ -163,7 +189,6 @@ def register(worker, session_key="primary"):
             automation_id=automation_id,
         )
 
-        # Reidrata o ledger local quando o Lovable conhece o link.
         for link in remote or []:
             try:
                 _local_save(
@@ -191,8 +216,6 @@ def register(worker, session_key="primary"):
         destination_message_id,
         source_grouped_id=None,
     ):
-        # CRITICO: persiste localmente PRIMEIRO. Se Lovable estiver fora,
-        # recovery/restart ainda sabe que a mensagem ja foi publicada.
         _local_save(
             conn,
             automation_id=automation_id,
@@ -275,13 +298,13 @@ def register(worker, session_key="primary"):
                 conn.execute("ROLLBACK")
             except Exception:
                 pass
-            # Em caso de falha do SQLite, ainda usa o mecanismo original.
             return await original_claim_fingerprint(fingerprint)
 
     worker.find_message_links = durable_find_message_links
     worker.save_message_link = durable_save_message_link
     worker.remove_message_links = durable_remove_message_links
     worker.claim_fingerprint = durable_claim_fingerprint
+    worker.commit_publication_local = immediate_local_commit
 
     print(
         f"[Ledger:{session_key}] idempotencia duravel ativa db={path} "
