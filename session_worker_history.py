@@ -1,7 +1,7 @@
 """Entrypoint do worker multi-sessao com backfill historico programado.
 
 Mantem session_worker.py intacto e adiciona camadas isoladas de historico,
-rodape, diagnostico e roteamento estrito de publicacao.
+rodape, diagnostico, idempotencia duravel e roteamento estrito de publicacao.
 """
 
 import asyncio
@@ -10,6 +10,8 @@ import album_buttons_addon
 import button_destination_health
 import historical_backfill
 import message_footer_addon
+import publication_ledger
+import runtime_safety
 import session_worker as base
 import strict_publication_router
 
@@ -161,6 +163,14 @@ async def history_aware_load_automations(force_refresh=False):
 
 base.load_session_automations = history_aware_load_automations
 worker.load_automations = history_aware_load_automations
+
+# Impede worker legado/duplicado de usar a mesma sessao Telegram.
+runtime_safety.register(worker=worker, session_key=SESSION_KEY)
+
+# Idempotencia persistente entre realtime, recovery, historico e reinicios.
+# O SQLite e compartilhado no servidor e registra source -> destination localmente
+# antes de depender da persistencia remota do Lovable.
+publication_ledger.register(worker=worker, session_key=SESSION_KEY)
 
 # Rodape de seguranca: depois de Replace/blacklist e antes do envio.
 message_footer_addon.register(worker=worker, session_key=SESSION_KEY)
