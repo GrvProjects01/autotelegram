@@ -6,6 +6,7 @@ Regra:
 - falha do bot nunca vira fallback humano silencioso;
 - midia individual com botoes e baixada e validada antes do upload;
 - preview de link/webpage nao e tratado como arquivo de midia;
+- sucesso Telegram e registrado localmente IMEDIATAMENTE antes de qualquer HTTP/log;
 - erros de bookkeeping da rotacao depois de um envio bem-sucedido nao podem
   transformar sucesso no Telegram em falsa falha e gerar duplicidade.
 """
@@ -27,12 +28,6 @@ def _has_buttons(worker, automation):
 
 
 def _has_downloadable_media(message):
-    """Somente foto/documento sao tratados como arquivo para download/reupload.
-
-    MessageMediaWebPage (preview de link) tambem aparece em message.media, mas nao
-    representa um arquivo. Tratar preview como arquivo causava download vazio e
-    publicacoes aparentemente desconfiguradas.
-    """
     media = getattr(message, "media", None)
     if media is None:
         return False
@@ -103,8 +98,6 @@ def register(worker, base, session_key="primary"):
     original_try_publish = worker.try_publish_with_inline_buttons
     original_commit_rotation = base._commit_rotation
 
-    # A mensagem ja foi aceita pelo Telegram antes de _commit_rotation rodar.
-    # Portanto erro ao persistir cursor NUNCA pode subir como erro de envio.
     async def safe_commit_rotation(key, next_cursor):
         try:
             await original_commit_rotation(key, next_cursor)
@@ -128,7 +121,6 @@ def register(worker, base, session_key="primary"):
         preserve_formatting,
         automation,
     ):
-        # Sem botoes validos: devolve None e deixa o worker seguir pelo usuario.
         if not _has_buttons(worker, automation):
             return None
 
@@ -164,7 +156,6 @@ def register(worker, base, session_key="primary"):
                         shutil.rmtree(temp_dir, ignore_errors=True)
 
             else:
-                # Webpage preview/link nao e arquivo. Publica como texto pelo bot.
                 if not processed_text:
                     raise ButtonPublicationError(
                         "automacao possui botoes, mas a mensagem nao possui texto nem midia publicavel"
@@ -180,6 +171,19 @@ def register(worker, base, session_key="primary"):
             if sent is None:
                 raise ButtonPublicationError("bot publisher retornou resultado vazio")
 
+            # CRITICO: Telegram ja confirmou o envio. Registra SINCRONAMENTE no
+            # SQLite antes de prints, HTTP, logs ou qualquer await adicional.
+            immediate_commit = getattr(worker, "commit_publication_local", None)
+            if callable(immediate_commit):
+                immediate_commit(
+                    automation_id=automation_id,
+                    source_chat_id=getattr(message, "chat_id", None) or getattr(message, "peer_id", None) or "",
+                    source_message_id=getattr(message, "id", None),
+                    destination_chat_id=destination,
+                    destination_message_id=sent.id,
+                    source_grouped_id=getattr(message, "grouped_id", None),
+                )
+
             print(
                 f"[Strict Routing:{session_key}] BOT OK "
                 f"automacao={automation_id} bot={bot_key or '-'} "
@@ -188,8 +192,6 @@ def register(worker, base, session_key="primary"):
             return sent
 
         except Exception as error:
-            # CRITICO: nao retornar None aqui. None faria publish_single_message
-            # cair no envio humano e criaria exatamente a duplicidade observada.
             print(
                 f"[Strict Routing:{session_key}] BOT FAIL SEM FALLBACK HUMANO "
                 f"automacao={automation_id} bot={bot_key or '-'} "
