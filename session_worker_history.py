@@ -8,6 +8,7 @@ import asyncio
 
 import album_buttons_addon
 import button_destination_health
+import heartbeat_guard
 import historical_backfill
 import message_footer_addon
 import publication_ledger
@@ -42,11 +43,6 @@ def _truthy(value):
 
 
 def automation_is_active(automation):
-    """Impede automacoes pausadas/deletadas de entrarem em qualquer fluxo.
-
-    Campos ausentes preservam compatibilidade com automacoes antigas. Apenas sinais
-    explicitos de pausa, desativacao, arquivamento ou delecao bloqueiam a tarefa.
-    """
     if not isinstance(automation, dict):
         return False
 
@@ -74,7 +70,6 @@ def automation_is_active(automation):
 
 
 def rotation_batch_by_sort_order(automation, cursor):
-    """Monta os grupos da rotacao sem deixar `row` alterar a sequencia."""
     buttons = worker.button_publisher.normalize_buttons(automation)
     if not buttons:
         return [], 0
@@ -93,7 +88,6 @@ def rotation_batch_by_sort_order(automation, cursor):
         return (sort_order, row)
 
     buttons = sorted(buttons, key=rotation_order)
-
     size = base._button_rotation_size(automation)
     groups = [
         buttons[index:index + size]
@@ -105,8 +99,8 @@ def rotation_batch_by_sort_order(automation, cursor):
 
     group_index = int(cursor or 0) % len(groups)
     next_cursor = (group_index + 1) % len(groups)
-
     selected = groups[group_index]
+
     print(
         f"[Buttons Rotation:{SESSION_KEY}] grupo={group_index} "
         f"ordens={[item.get('sort_order') for item in selected]} "
@@ -116,7 +110,6 @@ def rotation_batch_by_sort_order(automation, cursor):
     return selected, next_cursor
 
 
-# sort_order escolhe o grupo; row controla apenas o layout visual.
 base._rotation_batch = rotation_batch_by_sort_order
 
 
@@ -164,28 +157,17 @@ async def history_aware_load_automations(force_refresh=False):
 base.load_session_automations = history_aware_load_automations
 worker.load_automations = history_aware_load_automations
 
-# Impede worker legado/duplicado de usar a mesma sessao Telegram.
 runtime_safety.register(worker=worker, session_key=SESSION_KEY)
-
-# Idempotencia persistente entre realtime, recovery, historico e reinicios.
-# O SQLite e compartilhado no servidor e registra source -> destination localmente
-# antes de depender da persistencia remota do Lovable.
 publication_ledger.register(worker=worker, session_key=SESSION_KEY)
-
-# Rodape de seguranca: depois de Replace/blacklist e antes do envio.
+heartbeat_guard.register(worker=worker, session_key=SESSION_KEY, min_interval_seconds=45)
 message_footer_addon.register(worker=worker, session_key=SESSION_KEY)
 
-# Regra central para publicacao individual:
-# com botoes -> somente bot; sem botoes -> sessao humana.
-# Tambem valida download de midia e impede erro de cursor pos-envio de gerar duplicidade.
 strict_publication_router.register(
     worker=worker,
     base=base,
     session_key=SESSION_KEY,
 )
 
-# Albuns precisam de tratamento separado porque Telegram nao aceita keyboard inline
-# dentro do media group. O album e preservado e o CTA com botoes sai separado.
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 
 
