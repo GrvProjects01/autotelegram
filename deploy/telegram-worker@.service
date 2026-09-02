@@ -2,6 +2,8 @@
 Description=Telegram Automation Worker - session %i
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,8 +13,8 @@ WorkingDirectory=/home/ubuntu/autotelegram/autotelegram
 EnvironmentFile=/home/ubuntu/autotelegram/autotelegram/.env
 EnvironmentFile=/home/ubuntu/autotelegram/autotelegram/sessions/%i.env
 ExecStart=/home/ubuntu/autotelegram/autotelegram/venv/bin/python /home/ubuntu/autotelegram/autotelegram/session_worker_history.py
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
 KillSignal=SIGINT
 TimeoutStopSec=30
 
