@@ -5,6 +5,7 @@ Regra:
 - automacao com botoes validos -> somente o bot publicador envia;
 - falha do bot nunca vira fallback humano silencioso;
 - midia individual com botoes e baixada e validada antes do upload;
+- preview de link/webpage nao e tratado como arquivo de midia;
 - erros de bookkeeping da rotacao depois de um envio bem-sucedido nao podem
   transformar sucesso no Telegram em falsa falha e gerar duplicidade.
 """
@@ -23,6 +24,22 @@ def _has_buttons(worker, automation):
         return bool(worker.automation_has_inline_buttons(automation))
     except Exception:
         return False
+
+
+def _has_downloadable_media(message):
+    """Somente foto/documento sao tratados como arquivo para download/reupload.
+
+    MessageMediaWebPage (preview de link) tambem aparece em message.media, mas nao
+    representa um arquivo. Tratar preview como arquivo causava download vazio e
+    publicacoes aparentemente desconfiguradas.
+    """
+    media = getattr(message, "media", None)
+    if media is None:
+        return False
+    return bool(
+        getattr(media, "photo", None) is not None
+        or getattr(media, "document", None) is not None
+    )
 
 
 def _expected_document_size(message):
@@ -125,7 +142,7 @@ def register(worker, base, session_key="primary"):
         entities = processed_entities if preserve_formatting else []
 
         try:
-            if getattr(message, "media", None) and preserve_media:
+            if _has_downloadable_media(message) and preserve_media:
                 temp_dir = None
                 try:
                     temp_dir, file_path = await _download_media_checked(
@@ -147,6 +164,7 @@ def register(worker, base, session_key="primary"):
                         shutil.rmtree(temp_dir, ignore_errors=True)
 
             else:
+                # Webpage preview/link nao e arquivo. Publica como texto pelo bot.
                 if not processed_text:
                     raise ButtonPublicationError(
                         "automacao possui botoes, mas a mensagem nao possui texto nem midia publicavel"
