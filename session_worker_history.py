@@ -19,6 +19,58 @@ SESSION_KEY = base.SESSION_KEY
 _original_session_loader = base.load_session_automations
 
 
+def _explicit_false(value):
+    if value is False:
+        return True
+    if isinstance(value, (int, float)):
+        return value == 0
+    return str(value or "").strip().lower() in {
+        "0", "false", "no", "off", "nao", "não", "disabled", "inactive"
+    }
+
+
+def _truthy(value):
+    if value is True:
+        return True
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {
+        "1", "true", "yes", "on", "sim", "enabled", "active", "paused"
+    }
+
+
+def automation_is_active(automation):
+    """Impede automacoes pausadas/deletadas de entrarem em qualquer fluxo.
+
+    Campos ausentes preservam compatibilidade com automacoes antigas. Apenas sinais
+    explicitos de pausa, desativacao, arquivamento ou delecao bloqueiam a tarefa.
+    """
+    if not isinstance(automation, dict):
+        return False
+
+    for key in ("enabled", "is_active", "active"):
+        if key in automation and _explicit_false(automation.get(key)):
+            return False
+
+    for key in ("paused", "is_paused"):
+        if key in automation and _truthy(automation.get(key)):
+            return False
+
+    status = str(automation.get("status") or "").strip().lower()
+    if status in {
+        "paused", "pause", "inactive", "disabled", "stopped", "stop",
+        "deleted", "archived", "cancelled", "canceled"
+    }:
+        return False
+
+    if automation.get("deleted_at") not in (None, ""):
+        return False
+    if automation.get("archived_at") not in (None, ""):
+        return False
+
+    return True
+
+
 def rotation_batch_by_sort_order(automation, cursor):
     """Monta os grupos da rotacao sem deixar `row` alterar a sequencia."""
     buttons = worker.button_publisher.normalize_buttons(automation)
@@ -67,7 +119,20 @@ base._rotation_batch = rotation_batch_by_sort_order
 
 
 async def history_aware_load_automations(force_refresh=False):
-    automations = await _original_session_loader(force_refresh=force_refresh)
+    raw_automations = await _original_session_loader(force_refresh=force_refresh)
+
+    automations = [
+        automation
+        for automation in raw_automations
+        if automation_is_active(automation)
+    ]
+
+    skipped = len(raw_automations) - len(automations)
+    if force_refresh or skipped:
+        print(
+            f"[Automation Guard:{SESSION_KEY}] ativas={len(automations)} "
+            f"bloqueadas={skipped} recebidas={len(raw_automations)}"
+        )
 
     only_id = historical_backfill.active_automation_id.get()
     if only_id:
