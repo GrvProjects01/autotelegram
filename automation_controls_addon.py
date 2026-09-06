@@ -93,7 +93,6 @@ def _replace_visible_links(worker, text, entities, target, scope):
     if not matches:
         return text, entities
 
-    # Evita sobreposicao e processa da esquerda para direita.
     matches.sort(key=lambda item: (item[0], item[1]))
     filtered = []
     last_end = -1
@@ -105,7 +104,6 @@ def _replace_visible_links(worker, text, entities, target, scope):
 
     pieces = []
     cursor = 0
-    working_prefix = ""
     for start, end, raw in filtered:
         pieces.append(text[cursor:start])
         current_before = "".join(pieces)
@@ -131,12 +129,22 @@ def _replace_visible_links(worker, text, entities, target, scope):
 def register(worker, session_key="primary"):
     publisher_cls = type(worker.button_publisher)
     original_normalize_buttons = publisher_cls.normalize_buttons
+    original_has_buttons = publisher_cls.has_buttons
     original_process_rich_text = worker.process_rich_text
 
     def normalize_buttons_with_toggle(automation):
         if not _buttons_enabled(automation):
             return []
         return original_normalize_buttons(automation)
+
+    def has_buttons_with_toggle(cls, automation):
+        if not _buttons_enabled(automation):
+            print(
+                f"[Buttons Toggle:{session_key}] desativados "
+                f"automation={automation.get('id') if isinstance(automation, dict) else '-'}"
+            )
+            return False
+        return original_has_buttons(automation)
 
     def process_rich_text_with_override(text, entities, automation):
         processed_text, processed_entities = original_process_rich_text(
@@ -153,7 +161,6 @@ def register(worker, session_key="primary"):
 
         result_entities = copy.deepcopy(processed_entities or [])
 
-        # Links ocultos: texto clicavel com URL por baixo.
         for entity in result_entities:
             if isinstance(entity, worker.MessageEntityTextUrl):
                 current = str(getattr(entity, "url", "") or "")
@@ -175,6 +182,7 @@ def register(worker, session_key="primary"):
         return result_text, result_entities
 
     publisher_cls.normalize_buttons = staticmethod(normalize_buttons_with_toggle)
+    publisher_cls.has_buttons = classmethod(has_buttons_with_toggle)
     worker.process_rich_text = process_rich_text_with_override
 
     print(
