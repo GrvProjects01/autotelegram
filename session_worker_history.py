@@ -7,6 +7,7 @@ rodape, diagnostico, idempotencia duravel e roteamento estrito de publicacao.
 import asyncio
 
 import album_buttons_addon
+import automation_controls_addon
 import button_contract_guard
 import button_destination_health
 import heartbeat_guard
@@ -164,9 +165,11 @@ heartbeat_guard.register(worker=worker, session_key=SESSION_KEY, min_interval_se
 message_footer_addon.register(worker=worker, session_key=SESSION_KEY)
 
 # Contrato entre o payload do Lovable e o normalizador do worker.
-# Deve ser registrado antes do roteador estrito para que a decisão
-# "tem botões?" use exatamente os mesmos formatos aceitos pelo painel.
 button_contract_guard.register(worker=worker, session_key=SESSION_KEY)
+
+# Controles por automacao: liga/desliga botoes e override global de links.
+# Registrado depois do contrato para que o toggle tenha precedencia final.
+automation_controls_addon.register(worker=worker, session_key=SESSION_KEY)
 
 strict_publication_router.register(
     worker=worker,
