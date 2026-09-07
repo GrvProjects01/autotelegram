@@ -27,6 +27,48 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Diagnose GitHub OIDC claims
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          RESPONSE=$(curl -fsSL \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+
+          export OIDC_TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$RESPONSE")
+
+          python3 - <<'PY'
+          import os
+          import json
+          import base64
+
+          token = os.environ["OIDC_TOKEN"]
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+
+          allowed = [
+              "iss",
+              "aud",
+              "sub",
+              "repository",
+              "repository_owner",
+              "repository_owner_id",
+              "ref",
+              "ref_type",
+              "event_name",
+              "workflow",
+              "job_workflow_ref",
+          ]
+
+          print("=== GitHub OIDC claims (safe diagnostic) ===")
+          for key in allowed:
+              if key in claims:
+                  print(f"{key}={claims[key]}")
+          print("============================================")
+          PY
+
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
