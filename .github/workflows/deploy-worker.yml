@@ -1,0 +1,124 @@
+name: Deploy Telegram Worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-telegram-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AWS_REGION: us-east-2
+      INSTANCE_ID: i-0985b564e9e32a7cd
+      DEPLOY_BRANCH: feat/multi-user-sessions
+      PROJECT_DIR: /home/ubuntu/autotelegram/autotelegram
+      AWS_ROLE_ARN: arn:aws:iam::649089875201:role/RocfortMessengerGitHubDeployRole
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Send deploy command to EC2
+        id: send
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          COMMAND_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "GitHub deploy ${GITHUB_SHA}" \
+            --parameters commands="set -Eeuo pipefail,cd '$PROJECT_DIR',sudo -u ubuntu git fetch --prune origin '$DEPLOY_BRANCH',sudo -u ubuntu git checkout '$DEPLOY_BRANCH',sudo -u ubuntu git pull --ff-only origin '$DEPLOY_BRANCH',chmod +x deploy/deploy-worker.sh,DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh" \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+          echo "SSM Command ID: $COMMAND_ID"
+
+      - name: Wait for deploy result
+        shell: bash
+        env:
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+        run: |
+          set -Eeuo pipefail
+
+          for attempt in $(seq 1 60); do
+            STATUS=$(aws ssm get-command-invocation \
+              --region "$AWS_REGION" \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query 'Status' \
+              --output text 2>/dev/null || true)
+
+            echo "Attempt $attempt: ${STATUS:-Pending}"
+
+            case "$STATUS" in
+              Success)
+                break
+                ;;
+              Failed|Cancelled|TimedOut|Cancelling)
+                echo "Deploy failed with status: $STATUS"
+                aws ssm get-command-invocation \
+                  --region "$AWS_REGION" \
+                  --command-id "$COMMAND_ID" \
+                  --instance-id "$INSTANCE_ID" \
+                  --output json || true
+                exit 1
+                ;;
+            esac
+
+            sleep 10
+          done
+
+          FINAL_STATUS=$(aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query 'Status' \
+            --output text)
+
+          if [[ "$FINAL_STATUS" != "Success" ]]; then
+            echo "Deploy did not finish successfully: $FINAL_STATUS"
+            aws ssm get-command-invocation \
+              --region "$AWS_REGION" \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --output json || true
+            exit 1
+          fi
+
+      - name: Show deploy output
+        if: always()
+        shell: bash
+        env:
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+        run: |
+          if [[ -z "${COMMAND_ID:-}" ]]; then
+            exit 0
+          fi
+
+          aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
+            --output json || true
