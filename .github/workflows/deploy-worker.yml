@@ -84,12 +84,16 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          DEPLOY_COMMAND="set -Eeuo pipefail && cd '$PROJECT_DIR' && sudo -u ubuntu git fetch --prune origin '$DEPLOY_BRANCH' && sudo -u ubuntu git checkout '$DEPLOY_BRANCH' && sudo -u ubuntu git pull --ff-only origin '$DEPLOY_BRANCH' && chmod +x deploy/deploy-worker.sh && DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh"
+
+          PARAMETERS=$(jq -cn --arg cmd "$DEPLOY_COMMAND" '{commands:[$cmd]}')
+
           COMMAND_ID=$(aws ssm send-command \
             --region "$AWS_REGION" \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "GitHub deploy ${GITHUB_SHA}" \
-            --parameters commands="set -Eeuo pipefail,cd '$PROJECT_DIR',sudo -u ubuntu git fetch --prune origin '$DEPLOY_BRANCH',sudo -u ubuntu git checkout '$DEPLOY_BRANCH',sudo -u ubuntu git pull --ff-only origin '$DEPLOY_BRANCH',chmod +x deploy/deploy-worker.sh,DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh" \
+            --parameters "$PARAMETERS" \
             --query 'Command.CommandId' \
             --output text)
 
