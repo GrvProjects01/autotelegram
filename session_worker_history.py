@@ -16,6 +16,7 @@ import historical_backfill
 import message_footer_addon
 import publication_ledger
 import recurring_messages_addon
+import recurring_session_transport_addon
 import runtime_safety
 import session_worker as base
 import strict_publication_router
@@ -180,6 +181,10 @@ strict_publication_router.register(
 )
 
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
+
+# Estende o scheduler unico: transport=bot (cenario 1) ou transport=session (cenario 2).
+# Precisa registrar antes de recurring_messages_addon.run() iniciar.
+recurring_session_transport_addon.register()
 
 
 async def main():
