@@ -1,6 +1,11 @@
 name: Deploy Telegram Worker
 
 on:
+  push:
+    branches:
+      - production
+    paths-ignore:
+      - '.github/workflows/deploy-worker.yml'
   workflow_dispatch:
 
 permissions:
@@ -19,13 +24,55 @@ jobs:
     env:
       AWS_REGION: us-east-2
       INSTANCE_ID: i-0985b564e9e32a7cd
-      DEPLOY_BRANCH: feat/multi-user-sessions
+      DEPLOY_BRANCH: production
       PROJECT_DIR: /home/ubuntu/autotelegram/autotelegram
       AWS_ROLE_ARN: arn:aws:iam::649089875201:role/RocfortMessengerGitHubDeployRole
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Diagnose GitHub OIDC claims
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          RESPONSE=$(curl -fsSL \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+
+          export OIDC_TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$RESPONSE")
+
+          python3 - <<'PY'
+          import os
+          import json
+          import base64
+
+          token = os.environ["OIDC_TOKEN"]
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+
+          allowed = [
+              "iss",
+              "aud",
+              "sub",
+              "repository",
+              "repository_owner",
+              "repository_owner_id",
+              "ref",
+              "ref_type",
+              "event_name",
+              "workflow",
+              "job_workflow_ref",
+          ]
+
+          print("=== GitHub OIDC claims (safe diagnostic) ===")
+          for key in allowed:
+              if key in claims:
+                  print(f"{key}={claims[key]}")
+          print("============================================")
+          PY
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -42,12 +89,15 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          DEPLOY_COMMAND="set -Eeuo pipefail && cd '$PROJECT_DIR' && test -f deploy/deploy-worker.sh && chmod 0644 deploy/deploy-worker.sh && DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh"
+          PARAMETERS=$(jq -cn --arg cmd "$DEPLOY_COMMAND" '{commands:[$cmd]}')
+
           COMMAND_ID=$(aws ssm send-command \
             --region "$AWS_REGION" \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "GitHub deploy ${GITHUB_SHA}" \
-            --parameters commands="set -Eeuo pipefail,cd '$PROJECT_DIR',sudo -u ubuntu git fetch --prune origin '$DEPLOY_BRANCH',sudo -u ubuntu git checkout '$DEPLOY_BRANCH',sudo -u ubuntu git pull --ff-only origin '$DEPLOY_BRANCH',chmod +x deploy/deploy-worker.sh,DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh" \
+            --parameters "$PARAMETERS" \
             --query 'Command.CommandId' \
             --output text)
 
