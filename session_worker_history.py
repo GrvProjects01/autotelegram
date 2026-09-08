@@ -17,6 +17,7 @@ import message_footer_addon
 import publication_ledger
 import recurring_messages_addon
 import recurring_session_transport_addon
+import recurring_media_addon
 import runtime_safety
 import session_worker as base
 import strict_publication_router
@@ -167,11 +168,7 @@ publication_ledger.register(worker=worker, session_key=SESSION_KEY)
 heartbeat_guard.register(worker=worker, session_key=SESSION_KEY, min_interval_seconds=45)
 message_footer_addon.register(worker=worker, session_key=SESSION_KEY)
 
-# Contrato entre o payload do Lovable e o normalizador do worker.
 button_contract_guard.register(worker=worker, session_key=SESSION_KEY)
-
-# Controles por automacao: liga/desliga botoes e override global de links.
-# Registrado depois do contrato para que o toggle tenha precedencia final.
 automation_controls_addon.register(worker=worker, session_key=SESSION_KEY)
 
 strict_publication_router.register(
@@ -182,9 +179,10 @@ strict_publication_router.register(
 
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 
-# Estende o scheduler unico: transport=bot (cenario 1) ou transport=session (cenario 2).
-# Precisa registrar antes de recurring_messages_addon.run() iniciar.
+# Camadas do scheduler recorrente. A ordem importa:
+# 1) session adiciona transport=session; 2) media adiciona image/video aos dois transports.
 recurring_session_transport_addon.register()
+recurring_media_addon.register()
 
 
 async def main():
