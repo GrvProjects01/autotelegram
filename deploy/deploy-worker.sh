@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/home/ubuntu/autotelegram/autotelegram}"
-DEPLOY_BRANCH="${DEPLOY_BRANCH:-feat/multi-user-sessions}"
+DEPLOY_BRANCH="${DEPLOY_BRANCH:-production}"
 DEPLOY_USER="${DEPLOY_USER:-ubuntu}"
 VENV_DIR="${VENV_DIR:-$PROJECT_DIR/venv}"
 SERVICE_TEMPLATE_SRC="$PROJECT_DIR/deploy/telegram-worker@.service"
@@ -39,7 +39,6 @@ require_root_or_sudo
 log "repositorio: $PROJECT_DIR"
 log "branch alvo: $DEPLOY_BRANCH"
 
-# Nao sobrescreve alteracoes manuais em arquivos rastreados na EC2.
 DIRTY_TRACKED="$(run_as_deploy_user git -C "$PROJECT_DIR" status --porcelain --untracked-files=no)"
 if [[ -n "$DIRTY_TRACKED" ]]; then
   printf '%s\n' "$DIRTY_TRACKED" >&2
@@ -71,7 +70,13 @@ log "validando sintaxe Python critica"
 run_as_deploy_user "$VENV_DIR/bin/python" -m py_compile \
   "$PROJECT_DIR/session_worker_history.py" \
   "$PROJECT_DIR/session_worker.py" \
-  "$PROJECT_DIR/worker.py"
+  "$PROJECT_DIR/worker.py" \
+  "$PROJECT_DIR/recurring_messages_addon.py"
+
+if [[ -x "$VENV_DIR/bin/pytest" && -f "$PROJECT_DIR/tests/test_recurring_messages_addon.py" ]]; then
+  log "testando scheduler recorrente"
+  run_as_deploy_user "$VENV_DIR/bin/pytest" -q "$PROJECT_DIR/tests/test_recurring_messages_addon.py"
+fi
 
 log "instalando template systemd"
 if [[ "$(id -u)" -eq 0 ]]; then
