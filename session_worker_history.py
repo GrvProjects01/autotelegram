@@ -1,8 +1,8 @@
 """Entrypoint do worker multi-sessao com backfill historico programado.
 
 Mantem session_worker.py intacto e adiciona camadas isoladas de historico,
-rodape, diagnostico, idempotencia duravel, mensagens recorrentes e roteamento
-estrito de publicacao.
+rodape, diagnostico, idempotencia duravel, mensagens recorrentes, importacao de
+mensagens Telegram e roteamento estrito de publicacao.
 """
 
 import asyncio
@@ -19,6 +19,7 @@ import recurring_messages_addon
 import recurring_session_transport_addon
 import recurring_media_addon
 import recurring_rich_text_addon
+import telegram_message_import_addon
 import runtime_safety
 import session_worker as base
 import strict_publication_router
@@ -203,13 +204,19 @@ async def main():
             session_key=SESSION_KEY,
         )
     )
+    import_task = asyncio.create_task(
+        telegram_message_import_addon.run(
+            worker=worker,
+            session_key=SESSION_KEY,
+        )
+    )
 
     try:
         await base.main()
     finally:
-        for task in (history_task, recurring_task):
+        for task in (history_task, recurring_task, import_task):
             task.cancel()
-        for task in (history_task, recurring_task):
+        for task in (history_task, recurring_task, import_task):
             try:
                 await task
             except asyncio.CancelledError:

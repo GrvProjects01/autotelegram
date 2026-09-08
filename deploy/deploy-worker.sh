@@ -62,7 +62,8 @@ run_as_deploy_user "$VENV_DIR/bin/python" -m py_compile \
   "$PROJECT_DIR/recurring_session_transport_addon.py" \
   "$PROJECT_DIR/recurring_media_addon.py" \
   "$PROJECT_DIR/telegram_rich_text.py" \
-  "$PROJECT_DIR/recurring_rich_text_addon.py"
+  "$PROJECT_DIR/recurring_rich_text_addon.py" \
+  "$PROJECT_DIR/telegram_message_import_addon.py"
 
 if [[ -x "$VENV_DIR/bin/pytest" ]]; then
   TEST_FILES=()
@@ -70,8 +71,9 @@ if [[ -x "$VENV_DIR/bin/pytest" ]]; then
   [[ -f "$PROJECT_DIR/tests/test_recurring_session_transport_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_recurring_session_transport_addon.py")
   [[ -f "$PROJECT_DIR/tests/test_recurring_media_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_recurring_media_addon.py")
   [[ -f "$PROJECT_DIR/tests/test_telegram_rich_text.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_telegram_rich_text.py")
+  [[ -f "$PROJECT_DIR/tests/test_telegram_message_import_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_telegram_message_import_addon.py")
   if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
-    log "testando scheduler recorrente"
+    log "testando scheduler recorrente/importacao"
     run_as_deploy_user "$VENV_DIR/bin/pytest" -q "${TEST_FILES[@]}"
   fi
 fi
