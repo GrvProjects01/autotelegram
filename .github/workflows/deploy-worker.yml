@@ -19,7 +19,7 @@ jobs:
     env:
       AWS_REGION: us-east-2
       INSTANCE_ID: i-0985b564e9e32a7cd
-      DEPLOY_BRANCH: feat/multi-user-sessions
+      DEPLOY_BRANCH: production
       PROJECT_DIR: /home/ubuntu/autotelegram/autotelegram
       AWS_ROLE_ARN: arn:aws:iam::649089875201:role/RocfortMessengerGitHubDeployRole
 
@@ -84,13 +84,7 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # O workflow antigo aplicava chmod +x neste arquivo, deixando o
-          # repositorio "dirty" e fazendo o proprio deploy se autobloquear.
-          # O arquivo e executado via `bash`, portanto nao precisa ser executavel.
-          # Restauramos somente o modo esperado 0644 e deixamos o script cuidar
-          # de fetch/pull, validacoes e restart dos servicos.
           DEPLOY_COMMAND="set -Eeuo pipefail && cd '$PROJECT_DIR' && test -f deploy/deploy-worker.sh && chmod 0644 deploy/deploy-worker.sh && DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh"
-
           PARAMETERS=$(jq -cn --arg cmd "$DEPLOY_COMMAND" '{commands:[$cmd]}')
 
           COMMAND_ID=$(aws ssm send-command \
