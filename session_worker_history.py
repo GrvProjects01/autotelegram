@@ -1,7 +1,8 @@
 """Entrypoint do worker multi-sessao com backfill historico programado.
 
 Mantem session_worker.py intacto e adiciona camadas isoladas de historico,
-rodape, diagnostico, idempotencia duravel e roteamento estrito de publicacao.
+rodape, diagnostico, idempotencia duravel, mensagens recorrentes e roteamento
+estrito de publicacao.
 """
 
 import asyncio
@@ -14,6 +15,7 @@ import heartbeat_guard
 import historical_backfill
 import message_footer_addon
 import publication_ledger
+import recurring_messages_addon
 import runtime_safety
 import session_worker as base
 import strict_publication_router
@@ -188,15 +190,23 @@ async def main():
             session_key=SESSION_KEY,
         )
     )
+    recurring_task = asyncio.create_task(
+        recurring_messages_addon.run(
+            worker=worker,
+            session_key=SESSION_KEY,
+        )
+    )
 
     try:
         await base.main()
     finally:
-        history_task.cancel()
-        try:
-            await history_task
-        except asyncio.CancelledError:
-            pass
+        for task in (history_task, recurring_task):
+            task.cancel()
+        for task in (history_task, recurring_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":
