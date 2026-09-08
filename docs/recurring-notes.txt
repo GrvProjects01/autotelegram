@@ -1,0 +1,1 @@
+Production promotion should trigger automatic deploy from production branch.
