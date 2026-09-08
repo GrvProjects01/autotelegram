@@ -1,0 +1,1 @@
+Scenario 2 recurring session transport ready for production promotion.
