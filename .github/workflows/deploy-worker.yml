@@ -84,7 +84,12 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          DEPLOY_COMMAND="set -Eeuo pipefail && cd '$PROJECT_DIR' && sudo -u ubuntu git fetch --prune origin '$DEPLOY_BRANCH' && sudo -u ubuntu git checkout '$DEPLOY_BRANCH' && sudo -u ubuntu git pull --ff-only origin '$DEPLOY_BRANCH' && chmod +x deploy/deploy-worker.sh && DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh"
+          # O workflow antigo aplicava chmod +x neste arquivo, deixando o
+          # repositorio "dirty" e fazendo o proprio deploy se autobloquear.
+          # O arquivo e executado via `bash`, portanto nao precisa ser executavel.
+          # Restauramos somente o modo esperado 0644 e deixamos o script cuidar
+          # de fetch/pull, validacoes e restart dos servicos.
+          DEPLOY_COMMAND="set -Eeuo pipefail && cd '$PROJECT_DIR' && test -f deploy/deploy-worker.sh && chmod 0644 deploy/deploy-worker.sh && DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh"
 
           PARAMETERS=$(jq -cn --arg cmd "$DEPLOY_COMMAND" '{commands:[$cmd]}')
 
