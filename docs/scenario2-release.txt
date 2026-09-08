@@ -1,1 +1,0 @@
-Promote recurring session transport to production.
