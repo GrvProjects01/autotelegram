@@ -18,6 +18,7 @@ import publication_ledger
 import recurring_messages_addon
 import recurring_session_transport_addon
 import recurring_media_addon
+import recurring_rich_text_addon
 import runtime_safety
 import session_worker as base
 import strict_publication_router
@@ -180,9 +181,12 @@ strict_publication_router.register(
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 
 # Camadas do scheduler recorrente. A ordem importa:
-# 1) session adiciona transport=session; 2) media adiciona image/video aos dois transports.
+# 1) session adiciona transport=session;
+# 2) media adiciona image/video;
+# 3) rich text preserva entidades e custom emoji em todos os caminhos.
 recurring_session_transport_addon.register()
 recurring_media_addon.register()
+recurring_rich_text_addon.register(worker)
 
 
 async def main():
