@@ -17,3 +17,6 @@ album_button_cta_state_*.json
 publication_ledger.sqlite3
 publication_ledger.sqlite3-wal
 publication_ledger.sqlite3-shm
+recurring_messages_state.sqlite3
+recurring_messages_state.sqlite3-wal
+recurring_messages_state.sqlite3-shm
