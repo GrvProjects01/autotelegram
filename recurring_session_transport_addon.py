@@ -3,14 +3,19 @@
 Estende recurring_messages_addon sem criar um segundo scheduler:
 - transport=bot continua no fluxo original;
 - transport=session usa a sessao Telethon do worker dono da tarefa;
+- aceita aliases comuns de chave de sessao vindos do painel;
+- resolve destino por ID, username ou link t.me;
+- troca bot -> sessao pode disparar imediatamente quando send_immediately=true;
 - marca mensagens como self-published para evitar loops/republicacao;
 - delete da mensagem anterior usa a mesma sessao que publicou;
 - FloodWait adia o proximo ciclo em vez de martelar a API.
 """
 
 import asyncio
+import re
 import sqlite3
 import time
+from urllib.parse import urlparse
 
 from telethon.errors import FloodWaitError
 
@@ -21,6 +26,7 @@ _registered = False
 _original_is_valid = recurring._is_valid
 _original_process_one = recurring._process_one
 _original_config_signature = recurring._config_signature
+_original_belongs_to_session = recurring._belongs_to_session
 
 
 def _transport(item):
@@ -33,11 +39,25 @@ def _transport(item):
 
 
 def _session_key(item):
+    """Normaliza a chave da sessao sem depender de um unico nome de campo.
+
+    worker_session_key e o contrato oficial. Os aliases existem para tornar o
+    worker resiliente a versoes anteriores/temporarias do painel.
+    """
     return str(
         item.get("worker_session_key")
         or item.get("telegram_session_key")
+        or item.get("session_key")
+        or item.get("publisher_session_key")
+        or item.get("telegram_session")
         or recurring.DEFAULT_SESSION_KEY
     ).strip().lower()
+
+
+def _belongs_to_session(item, session_key):
+    if _transport(item) == "session":
+        return _session_key(item) == str(session_key).strip().lower()
+    return _original_belongs_to_session(item, session_key)
 
 
 def _config_signature(item):
@@ -73,32 +93,77 @@ def _is_valid(item):
     return True
 
 
+def _normalize_destination(value):
+    """Aceita -100..., @username, username e links t.me/username."""
+    destination = str(value or "").strip()
+    if not destination:
+        return destination
+
+    if re.fullmatch(r"-?\d+", destination):
+        return destination
+
+    if destination.startswith("@"):
+        return destination[1:]
+
+    raw = destination
+    if raw.startswith("t.me/") or raw.startswith("telegram.me/"):
+        raw = "https://" + raw
+
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower()
+        if host in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
+            parts = [part for part in parsed.path.split("/") if part]
+            if parts and parts[0] != "c":
+                return parts[0].lstrip("@")
+
+    return destination
+
+
 async def _resolve_session_destination(worker, destination_chat_id):
-    destination = str(destination_chat_id).strip()
+    destination = _normalize_destination(destination_chat_id)
+    errors = []
 
     # IDs sincronizados pelo painel normalmente chegam como inteiros (-100...).
-    try:
-        return await worker.client.get_input_entity(int(destination))
-    except Exception:
-        pass
+    if re.fullmatch(r"-?\d+", destination or ""):
+        try:
+            return await worker.client.get_input_entity(int(destination))
+        except Exception as error:
+            errors.append(f"id:{type(error).__name__}")
 
+    # Username/@username/link publico.
     try:
         return await worker.client.get_input_entity(destination)
-    except Exception:
-        pass
+    except Exception as error:
+        errors.append(f"input:{type(error).__name__}")
 
+    # get_entity pode preencher/usar o cache MTProto em cenarios onde
+    # get_input_entity ainda nao conhece o peer localmente.
+    try:
+        entity = await worker.client.get_entity(
+            int(destination) if re.fullmatch(r"-?\d+", destination or "") else destination
+        )
+        return await worker.client.get_input_entity(entity)
+    except Exception as error:
+        errors.append(f"entity:{type(error).__name__}")
+
+    # Ultimo fallback: dialogs da propria sessao.
     async for dialog in worker.client.iter_dialogs():
         if str(dialog.id) == destination:
             return dialog.input_entity
+        username = str(getattr(dialog.entity, "username", "") or "").lower()
+        if username and username == str(destination).lstrip("@").lower():
+            return dialog.input_entity
 
     raise ValueError(
-        f"Sessao nao consegue resolver o destino {destination}. "
-        "Confirme que a conta participa do grupo/canal e possui permissao para publicar."
+        f"Sessao nao consegue resolver o destino {destination_chat_id} "
+        f"(normalizado={destination}; tentativas={','.join(errors)}). "
+        "Confirme que a conta participa do canal/grupo e possui permissao para publicar."
     )
 
 
 def _defer_state(store, recurring_id, next_run_at):
-    """Adia uma tarefa duravelmente apos FloodWait."""
+    """Atualiza next_run_at duravelmente."""
     with sqlite3.connect(store.path, timeout=10) as db:
         db.execute(
             """
@@ -109,6 +174,28 @@ def _defer_state(store, recurring_id, next_run_at):
             (float(next_run_at), float(time.time()), str(recurring_id)),
         )
         db.commit()
+
+
+def _adopt_session_transport_now(store, item, state, session_key, now):
+    """Ao trocar BOT -> SESSION, respeita send_immediately sem apagar historico.
+
+    O estado SQLite e compartilhado pelo mesmo recurring_id. Antes desta correcao,
+    a tarefa podia herdar o next_run_at do bot e parecer parada depois da troca.
+    """
+    expected = f"session:{session_key}"
+    previous = str(state.get("last_bot_key") or "")
+    if (
+        previous
+        and previous != expected
+        and recurring._truthy(item.get("send_immediately"), False)
+        and float(state.get("next_run_at") or 0) > now
+    ):
+        _defer_state(store, str(item.get("id") or "").strip(), now)
+        state["next_run_at"] = now
+        print(
+            f"[Recurring Session:{session_key}] transport alterado "
+            f"{previous} -> {expected}; envio imediato liberado"
+        )
 
 
 async def _delete_session_message(worker, destination_chat_id, message_id, session_key):
@@ -145,6 +232,8 @@ async def _process_session(worker, store, item, session_key):
     state = store.get_or_create(item, now)
     if state is None:
         return
+
+    _adopt_session_transport_now(store, item, state, session_key, now)
 
     # Limpeza pendente sempre ocorre com a mesma sessao dona da recorrencia.
     pending_id = state.get("pending_delete_message_id")
@@ -267,5 +356,6 @@ def register():
     recurring._config_signature = _config_signature
     recurring._is_valid = _is_valid
     recurring._process_one = _process_one
+    recurring._belongs_to_session = _belongs_to_session
     _registered = True
     print("[Recurring Session] transport=session registrado")
