@@ -13,6 +13,7 @@ import button_contract_guard
 import button_destination_health
 import heartbeat_guard
 import historical_backfill
+import historical_media_integrity_addon
 import message_footer_addon
 import publication_ledger
 import recurring_messages_addon
@@ -178,6 +179,10 @@ strict_publication_router.register(
     base=base,
     session_key=SESSION_KEY,
 )
+
+# Depois do roteador estrito, protege uploads de mídia do bot: conserva metadata
+# original de vídeo e garante que caption esperada não seja perdida silenciosamente.
+historical_media_integrity_addon.register(worker=worker, session_key=SESSION_KEY)
 
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 

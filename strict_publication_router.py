@@ -49,6 +49,35 @@ def _expected_document_size(message):
     return value if value > 0 else None
 
 
+def _source_media_metadata(message):
+    """Extrai metadata reutilizavel do documento original.
+
+    Ao baixar um video da sessao humana e reupar pelo bot, confiar apenas na
+    autodeteccao do arquivo temporario pode perder atributos de video (dimensoes,
+    duracao, streaming). Mantemos os atributos TL originais localmente e os
+    repassamos ao uploader do bot. Nada disso sai para Lovable/banco.
+    """
+    media = getattr(message, "media", None)
+    document = getattr(media, "document", None) if media is not None else None
+    if document is None:
+        return None
+
+    attributes = list(getattr(document, "attributes", None) or [])
+    mime_type = str(getattr(document, "mime_type", "") or "").strip() or None
+    is_video = bool(mime_type and mime_type.lower().startswith("video/"))
+    if not is_video:
+        for attribute in attributes:
+            if type(attribute).__name__ == "DocumentAttributeVideo":
+                is_video = True
+                break
+
+    return {
+        "attributes": attributes,
+        "mime_type": mime_type,
+        "is_video": is_video,
+    }
+
+
 async def _download_media_checked(worker, message, session_key, attempts=2):
     last_error = None
 
@@ -144,12 +173,17 @@ def register(worker, base, session_key="primary"):
                         attempts=2,
                     )
 
+                    send_automation = dict(automation)
+                    source_metadata = _source_media_metadata(message)
+                    if source_metadata:
+                        send_automation["_source_media_metadata"] = source_metadata
+
                     sent = await worker.button_publisher.send_file(
                         destination_chat_id=destination,
                         file_path=file_path,
                         caption=(processed_text if preserve_caption else ""),
                         entities=(entities if preserve_caption else []),
-                        automation=automation,
+                        automation=send_automation,
                     )
                 finally:
                     if temp_dir:
