@@ -1,6 +1,6 @@
 """Suporte de imagem/video para mensagens recorrentes (bot e sessao).
 
-Extende o scheduler existente sem criar outro relogio:
+Estende o scheduler existente sem criar outro relogio:
 - media_url opcional (HTTPS);
 - media_type: image|video;
 - baixa arquivo temporario com limite de tamanho;
@@ -8,9 +8,13 @@ Extende o scheduler existente sem criar outro relogio:
 - transport=session usa a sessao Telethon dona da tarefa;
 - texto vira caption quando existe midia;
 - arquivo temporario e sempre removido.
+
+IMPORTANTE: este addon e uma camada da cadeia do scheduler. Os hooks anteriores
+sao capturados em register(), nao no import do modulo. Assim, quando
+transport=session e registrado antes de media, a validacao de sessao nao e
+perdida pela camada de midia.
 """
 
-import asyncio
 import ipaddress
 import os
 import tempfile
@@ -24,9 +28,9 @@ import recurring_session_transport_addon as session_transport
 
 
 _registered = False
-_original_is_valid = recurring._is_valid
-_original_process_one = recurring._process_one
-_original_config_signature = recurring._config_signature
+_original_is_valid = None
+_original_process_one = None
+_original_config_signature = None
 
 DEFAULT_MAX_MEDIA_MB = 80
 ALLOWED_MEDIA_TYPES = {"image", "video"}
@@ -88,17 +92,24 @@ def _safe_media_url(url):
     )
 
 
+def _previous_is_valid(item):
+    # Antes de register() (ex.: teste unitario isolado), a camada imediatamente
+    # anterior correta e a de session transport, nao o validador bot-only base.
+    validator = _original_is_valid or session_transport._is_valid
+    return validator(item)
+
+
 def _is_valid(item):
     if not isinstance(item, dict):
         return False
 
     clone = dict(item)
-    # Os validadores anteriores exigiam texto. Para post com midia, usamos uma
+    # Validadores anteriores exigem texto. Para post somente com midia, usamos
     # sentinela apenas durante a validacao, sem alterar o payload real.
     if not _has_text(item) and _has_media(item):
         clone["message_text"] = "__media_only__"
 
-    if not _original_is_valid(clone):
+    if not _previous_is_valid(clone):
         return False
 
     if not (_has_text(item) or _has_media(item)):
@@ -114,7 +125,8 @@ def _is_valid(item):
 
 
 def _config_signature(item):
-    base = _original_config_signature(item)
+    previous = _original_config_signature or session_transport._config_signature
+    base = previous(item)
     media_bits = "|".join([
         _media_url(item),
         _media_type(item),
@@ -264,6 +276,13 @@ async def _process_media(worker, store, item, session_key):
     if state is None:
         return
 
+    # Mesmo no caminho de midia, troca BOT -> SESSION com envio imediato deve
+    # liberar o relogio persistido anterior.
+    if transport == "session":
+        session_transport._adopt_session_transport_now(
+            store, item, state, session_key, now
+        )
+
     pending_id = state.get("pending_delete_message_id")
     if pending_id and delete_previous:
         if transport == "session":
@@ -387,16 +406,24 @@ async def _process_media(worker, store, item, session_key):
 async def _process_one(worker, store, item, session_key):
     if _has_media(item):
         return await _process_media(worker, store, item, session_key)
-    return await _original_process_one(worker, store, item, session_key)
+    previous = _original_process_one or session_transport._process_one
+    return await previous(worker, store, item, session_key)
 
 
 def register():
-    global _registered
+    global _registered, _original_is_valid, _original_process_one, _original_config_signature
     if _registered:
         return
+
+    # CAPTURA TARDIA: nesse ponto session_transport.register() ja foi chamado
+    # pelo entrypoint. Isso preserva toda a cadeia anterior em vez de voltar ao
+    # validador bot-only capturado no import do modulo.
+    _original_is_valid = recurring._is_valid
+    _original_process_one = recurring._process_one
+    _original_config_signature = recurring._config_signature
 
     recurring._is_valid = _is_valid
     recurring._config_signature = _config_signature
     recurring._process_one = _process_one
     _registered = True
-    print("[Recurring Media] suporte image/video registrado")
+    print("[Recurring Media] suporte image/video registrado (chain-safe)")
