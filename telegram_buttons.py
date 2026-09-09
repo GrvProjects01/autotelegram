@@ -57,6 +57,19 @@ class TelegramButtonPublisher:
         value = re.sub(r"[^a-z0-9_.-]+", "_", value)
         return value.strip("_.-")
 
+    @staticmethod
+    def _token_bot_id(token):
+        """Extrai somente o ID público do bot da parte anterior aos dois-pontos.
+
+        Isso permite isolar o arquivo .session por identidade do bot sem expor
+        nem persistir o segredo do token no nome do arquivo/log.
+        """
+        token = str(token or "").strip()
+        if ":" not in token:
+            return ""
+        candidate = token.split(":", 1)[0].strip()
+        return candidate if candidate.isdigit() else ""
+
     def _load_config(self):
         raw_bots = {}
 
@@ -110,12 +123,25 @@ class TelegramButtonPublisher:
                 continue
 
             safe_session = self._safe_key(session_name) or f"telegram_bot_{key}"
+
+            # IMPORTANTE: uma mesma key pode receber um token de um bot novo.
+            # Telethon reaproveitaria o .session antigo e poderia continuar
+            # autorizado como o bot anterior. O ID numérico (parte pública do
+            # token) entra no nome da sessão para forçar uma sessão nova quando
+            # a identidade do bot mudar, sem expor o segredo do token.
+            token_bot_id = self._token_bot_id(token)
+            if token_bot_id:
+                identity_suffix = f"_{token_bot_id}"
+                if not safe_session.endswith(identity_suffix):
+                    safe_session = f"{safe_session}{identity_suffix}"
+
             session_path = os.path.join(BOT_SESSION_DIR, safe_session)
 
             self.bots[key] = {
                 "key": key,
                 "name": name,
                 "token": token,
+                "token_bot_id": token_bot_id or None,
                 "session_name": safe_session,
                 "client": TelegramClient(session_path, self.api_id, self.api_hash),
                 "entity_cache": OrderedDict(),
@@ -166,8 +192,18 @@ class TelegramButtonPublisher:
             try:
                 await bot["client"].start(bot_token=bot["token"])
                 me = await bot["client"].get_me()
+
+                expected_bot_id = bot.get("token_bot_id")
+                actual_bot_id = str(me.id)
+                if expected_bot_id and actual_bot_id != expected_bot_id:
+                    raise RuntimeError(
+                        f"Sessão do bot '{key}' autenticou como ID {actual_bot_id}, "
+                        f"mas o token pertence ao ID {expected_bot_id}. "
+                        "Remova a sessão antiga desse bot e reinicie o worker."
+                    )
+
                 bot["connected"] = True
-                bot["telegram_id"] = str(me.id)
+                bot["telegram_id"] = actual_bot_id
                 bot["username"] = me.username
                 connected += 1
 
@@ -307,6 +343,26 @@ class TelegramButtonPublisher:
         )
 
     @staticmethod
+    def normalize_style(value):
+        raw = str(value or "").strip().lower()
+        aliases = {
+            "blue": "primary",
+            "azul": "primary",
+            "primary": "primary",
+            "green": "success",
+            "verde": "success",
+            "success": "success",
+            "red": "danger",
+            "vermelho": "danger",
+            "danger": "danger",
+            "default": None,
+            "neutral": None,
+            "neutro": None,
+            "": None,
+        }
+        return aliases.get(raw)
+
+    @staticmethod
     def normalize_buttons(automation):
         raw_buttons = automation.get("buttons", []) or []
         normalized = []
@@ -336,11 +392,16 @@ class TelegramButtonPublisher:
             except (TypeError, ValueError):
                 sort_order = index
 
+            style = TelegramButtonPublisher.normalize_style(
+                item.get("style") or item.get("color")
+            )
+
             normalized.append({
                 "text": text,
                 "url": url,
                 "row": max(0, row),
                 "sort_order": sort_order,
+                "style": style,
             })
 
         normalized.sort(key=lambda button: (button["row"], button["sort_order"]))
@@ -354,7 +415,13 @@ class TelegramButtonPublisher:
 
         rows = defaultdict(list)
         for button in normalized:
-            rows[button["row"]].append(Button.url(button["text"], button["url"]))
+            rows[button["row"]].append(
+                Button.url(
+                    button["text"],
+                    button["url"],
+                    style=button.get("style"),
+                )
+            )
 
         return [rows[row] for row in sorted(rows.keys())]
 

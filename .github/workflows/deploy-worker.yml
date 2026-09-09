@@ -1,0 +1,174 @@
+name: Deploy Telegram Worker
+
+on:
+  push:
+    branches:
+      - production
+    paths-ignore:
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-telegram-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AWS_REGION: us-east-2
+      INSTANCE_ID: i-0985b564e9e32a7cd
+      DEPLOY_BRANCH: production
+      PROJECT_DIR: /home/ubuntu/autotelegram/autotelegram
+      AWS_ROLE_ARN: arn:aws:iam::649089875201:role/RocfortMessengerGitHubDeployRole
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Diagnose GitHub OIDC claims
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          RESPONSE=$(curl -fsSL \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+
+          export OIDC_TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$RESPONSE")
+
+          python3 - <<'PY'
+          import os
+          import json
+          import base64
+
+          token = os.environ["OIDC_TOKEN"]
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload.encode()).decode())
+
+          allowed = [
+              "iss",
+              "aud",
+              "sub",
+              "repository",
+              "repository_owner",
+              "repository_owner_id",
+              "ref",
+              "ref_type",
+              "event_name",
+              "workflow",
+              "job_workflow_ref",
+          ]
+
+          print("=== GitHub OIDC claims (safe diagnostic) ===")
+          for key in allowed:
+              if key in claims:
+                  print(f"{key}={claims[key]}")
+          print("============================================")
+          PY
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Send deploy command to EC2
+        id: send
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          DEPLOY_COMMAND="set -Eeuo pipefail && cd '$PROJECT_DIR' && test -f deploy/deploy-worker.sh && chmod 0644 deploy/deploy-worker.sh && DEPLOY_BRANCH='$DEPLOY_BRANCH' PROJECT_DIR='$PROJECT_DIR' bash deploy/deploy-worker.sh"
+          PARAMETERS=$(jq -cn --arg cmd "$DEPLOY_COMMAND" '{commands:[$cmd]}')
+
+          COMMAND_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "GitHub deploy ${GITHUB_SHA}" \
+            --parameters "$PARAMETERS" \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+          echo "SSM Command ID: $COMMAND_ID"
+
+      - name: Wait for deploy result
+        shell: bash
+        env:
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+        run: |
+          set -Eeuo pipefail
+
+          for attempt in $(seq 1 60); do
+            STATUS=$(aws ssm get-command-invocation \
+              --region "$AWS_REGION" \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query 'Status' \
+              --output text 2>/dev/null || true)
+
+            echo "Attempt $attempt: ${STATUS:-Pending}"
+
+            case "$STATUS" in
+              Success)
+                break
+                ;;
+              Failed|Cancelled|TimedOut|Cancelling)
+                echo "Deploy failed with status: $STATUS"
+                aws ssm get-command-invocation \
+                  --region "$AWS_REGION" \
+                  --command-id "$COMMAND_ID" \
+                  --instance-id "$INSTANCE_ID" \
+                  --output json || true
+                exit 1
+                ;;
+            esac
+
+            sleep 10
+          done
+
+          FINAL_STATUS=$(aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query 'Status' \
+            --output text)
+
+          if [[ "$FINAL_STATUS" != "Success" ]]; then
+            echo "Deploy did not finish successfully: $FINAL_STATUS"
+            aws ssm get-command-invocation \
+              --region "$AWS_REGION" \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --output json || true
+            exit 1
+          fi
+
+      - name: Show deploy output
+        if: always()
+        shell: bash
+        env:
+          COMMAND_ID: ${{ steps.send.outputs.command_id }}
+        run: |
+          if [[ -z "${COMMAND_ID:-}" ]]; then
+            exit 0
+          fi
+
+          aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
+            --output json || true
