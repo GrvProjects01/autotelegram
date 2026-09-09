@@ -14,6 +14,7 @@ import button_destination_health
 import heartbeat_guard
 import historical_backfill
 import historical_media_integrity_addon
+import media_transport_hardening
 import message_footer_addon
 import publication_ledger
 import recurring_messages_addon
@@ -183,6 +184,10 @@ strict_publication_router.register(
 # Depois do roteador estrito, protege uploads de mídia do bot: conserva metadata
 # original de vídeo e garante que caption esperada não seja perdida silenciosamente.
 historical_media_integrity_addon.register(worker=worker, session_key=SESSION_KEY)
+
+# Hardening global para TODAS as publicações de mídia: bot e sessão humana.
+# Também move temporários para o EBS e remove o fallback GetDialogsRequest de bots.
+media_transport_hardening.register(worker=worker, session_key=SESSION_KEY)
 
 album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 
