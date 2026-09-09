@@ -2,6 +2,7 @@
 
 Objetivos:
 - usar armazenamento temporário em disco (EBS) em vez do /tmp tmpfs por padrão;
+- validar download completo também no fluxo por sessão humana;
 - preservar metadata de vídeos quando a sessão humana baixa e reupa mídia Telegram;
 - impedir uso de GetDialogsRequest por contas bot ao resolver destinos;
 - validar a mensagem realmente persistida no Telegram após upload;
@@ -141,6 +142,39 @@ def register(worker, session_key="primary"):
     publisher = worker.button_publisher
 
     # ------------------------------------------------------------------
+    # 0) Download da sessão humana com validação contra tamanho do Telegram.
+    # session_worker.py já valida >0 bytes; aqui adicionamos a comparação exata
+    # quando o documento original informa `size`.
+    # ------------------------------------------------------------------
+    previous_download_media = worker.client.download_media
+
+    async def verified_download_media(message, *args, **kwargs):
+        expected_meta = _metadata_from_media(message)
+        path = await previous_download_media(message, *args, **kwargs)
+        if path and expected_meta and expected_meta.get("size"):
+            try:
+                local_size = os.path.getsize(os.fspath(path))
+            except OSError:
+                local_size = -1
+            expected_size = int(expected_meta["size"])
+            if local_size != expected_size:
+                try:
+                    if path and os.path.isfile(os.fspath(path)):
+                        os.remove(os.fspath(path))
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"download Telegram incompleto: local={local_size} esperado={expected_size}"
+                )
+            print(
+                f"[Media Verify:{session_key}] DOWNLOAD OK bytes={local_size} "
+                f"meta=({_metadata_summary(expected_meta)})"
+            )
+        return path
+
+    worker.client.download_media = verified_download_media
+
+    # ------------------------------------------------------------------
     # 1) Resolução de destino para bots SEM iter_dialogs/GetDialogsRequest.
     # Bots não podem executar GetDialogsRequest. O cache local da sessão do bot
     # e get_input_entity continuam sendo usados; username público também funciona.
@@ -237,7 +271,6 @@ def register(worker, session_key="primary"):
             **kwargs,
         ):
             kwargs.setdefault("force_document", False)
-            # Se metadata original informou vídeo, streaming deve ficar ativo.
             attrs = kwargs.get("attributes") or []
             if any(type(attr).__name__ == "DocumentAttributeVideo" for attr in attrs):
                 kwargs["supports_streaming"] = True
@@ -376,6 +409,6 @@ def register(worker, session_key="primary"):
     worker.client.send_file = verified_session_send_file
 
     print(
-        f"[Media Hardening:{session_key}] ativo: EBS temp + bot resolver seguro + "
-        "metadata/caption verification em bot e sessao"
+        f"[Media Hardening:{session_key}] ativo: EBS temp + download integral + "
+        "bot resolver seguro + metadata/caption verification em bot e sessao"
     )
