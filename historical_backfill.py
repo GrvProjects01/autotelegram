@@ -146,6 +146,31 @@ def _source_value(value):
     return text
 
 
+def _has_publishable_content(message):
+    """True only for history items the normal publisher can actually send.
+
+    Telegram history may begin with MessageService/event rows (channel creation,
+    migrations, pins, etc.). They have an id but no text/photo/document. Those
+    rows must advance the history cursor immediately instead of being treated as
+    a failed publication forever.
+    """
+    if str(getattr(message, "message", "") or "").strip():
+        return True
+
+    media = getattr(message, "media", None)
+    if media is None:
+        return False
+
+    return bool(
+        getattr(media, "photo", None) is not None
+        or getattr(media, "document", None) is not None
+    )
+
+
+def _unit_has_publishable_content(messages):
+    return any(_has_publishable_content(message) for message in (messages or []))
+
+
 async def _initial_cursor(worker, source_entity, automation):
     mode = start_mode(automation)
     if mode == "message_id":
@@ -158,8 +183,6 @@ async def _initial_cursor(worker, source_entity, automation):
     if mode == "date":
         date_value = _parse_datetime(automation.get("history_start_date"))
         if date_value is not None:
-            # Find the newest message strictly before the chosen date. The next
-            # ascending message after this cursor is therefore the first eligible.
             previous = await worker.client.get_messages(
                 source_entity,
                 limit=1,
@@ -282,8 +305,8 @@ async def _process_automation(worker, state, automation, session_key, state_path
     cursor = int(item.get("cursor_message_id") or 0)
     end_message_id = int(item.get("end_message_id") or 0)
 
-    # Skip already-published units immediately, so they do not consume the user
-    # configured interval. Cap the scan to avoid hogging the event loop.
+    # Skip already-published and non-publishable service/empty units immediately,
+    # so they do not consume the configured interval or trap the cursor forever.
     for _ in range(25):
         messages = await _next_batch(worker, source_entity, cursor, end_message_id)
         if not messages:
@@ -294,6 +317,19 @@ async def _process_automation(worker, state, automation, session_key, state_path
             return
 
         unit_last_id = max(int(message.id) for message in messages)
+
+        if not _unit_has_publishable_content(messages):
+            cursor = unit_last_id
+            item["cursor_message_id"] = cursor
+            item["last_skipped_message_id"] = unit_last_id
+            item["last_skip_reason"] = "empty_or_service_message"
+            _save_state(state_path, state)
+            print(
+                f"[History:{session_key}] SKIP não-publicável automação={automation_id} "
+                f"origem_msg={messages[0].id}-{unit_last_id}"
+            )
+            continue
+
         if await _already_published(worker, automation, source_id, messages):
             cursor = unit_last_id
             item["cursor_message_id"] = cursor
