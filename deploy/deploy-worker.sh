@@ -74,8 +74,9 @@ if [[ -x "$VENV_DIR/bin/pytest" ]]; then
   [[ -f "$PROJECT_DIR/tests/test_recurring_media_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_recurring_media_addon.py")
   [[ -f "$PROJECT_DIR/tests/test_telegram_rich_text.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_telegram_rich_text.py")
   [[ -f "$PROJECT_DIR/tests/test_telegram_message_import_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_telegram_message_import_addon.py")
+  [[ -f "$PROJECT_DIR/tests/test_video_preview_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_video_preview_addon.py")
   if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
-    log "testando scheduler recorrente/importacao"
+    log "testando scheduler recorrente/importacao/preview"
     run_as_deploy_user "$VENV_DIR/bin/pytest" -q "${TEST_FILES[@]}"
   fi
 fi
