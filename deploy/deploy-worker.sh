@@ -59,6 +59,7 @@ run_as_deploy_user "$VENV_DIR/bin/python" -m py_compile \
   "$PROJECT_DIR/session_worker.py" \
   "$PROJECT_DIR/worker.py" \
   "$PROJECT_DIR/media_transport_hardening.py" \
+  "$PROJECT_DIR/video_preview_addon.py" \
   "$PROJECT_DIR/recurring_messages_addon.py" \
   "$PROJECT_DIR/recurring_session_transport_addon.py" \
   "$PROJECT_DIR/recurring_media_addon.py" \
