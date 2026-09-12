@@ -25,6 +25,7 @@ import telegram_message_import_addon
 import runtime_safety
 import session_worker as base
 import strict_publication_router
+import video_preview_addon
 
 
 worker = base.worker
@@ -184,6 +185,10 @@ strict_publication_router.register(
 # Depois do roteador estrito, protege uploads de mídia do bot: conserva metadata
 # original de vídeo e garante que caption esperada não seja perdida silenciosamente.
 historical_media_integrity_addon.register(worker=worker, session_key=SESSION_KEY)
+
+# Preserva o thumbnail original do Telegram ANTES do hardening envolver o
+# downloader. Assim vídeos reupados por bot e sessão mantêm preview atraente.
+video_preview_addon.register(worker=worker, session_key=SESSION_KEY)
 
 # Hardening global para TODAS as publicações de mídia: bot e sessão humana.
 # Também move temporários para o EBS e remove o fallback GetDialogsRequest de bots.
