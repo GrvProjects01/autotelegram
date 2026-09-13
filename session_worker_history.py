@@ -14,6 +14,7 @@ import button_destination_health
 import heartbeat_guard
 import historical_backfill
 import historical_media_integrity_addon
+import http_resilience_addon
 import media_transport_hardening
 import message_footer_addon
 import publication_ledger
@@ -30,6 +31,16 @@ import video_preview_addon
 
 worker = base.worker
 SESSION_KEY = base.SESSION_KEY
+
+# Instala resiliencia HTTP antes de capturar o loader da sessao. Assim todo o
+# pipeline (forward, historico, recorrentes, imports e heartbeat) usa o mesmo
+# hardening sem quebrar a injecao de telegram_session_key do session_worker.
+http_resilience_addon.register(
+    worker=worker,
+    base=base,
+    session_key=SESSION_KEY,
+)
+
 _original_session_loader = base.load_session_automations
 
 
