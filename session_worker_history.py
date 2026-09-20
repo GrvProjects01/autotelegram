@@ -215,7 +215,10 @@ album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 recurring_session_transport_addon.register()
 recurring_media_addon.register()
 recurring_rich_text_addon.register(worker)
-# Rotacao entra por ultimo para que cada variante selecionada atravesse todas as\n# camadas anteriores (session/media/rich text) com seu proprio conteudo.\nrecurring_rotation_addon.register()\n
+# Rotacao entra por ultimo para que cada variante selecionada atravesse todas as
+# camadas anteriores (session/media/rich text) com seu proprio conteudo.
+recurring_rotation_addon.register()
+
 
 async def main():
     history_task = asyncio.create_task(
