@@ -2,7 +2,8 @@
 
 Estende o scheduler existente sem criar outro relogio:
 - media_url opcional (HTTPS);
-- media_type: image|video|audio|voice;\n- audio/voice pode ser enviado como voice note nativa do Telegram;
+- media_type: image|video|audio|voice;
+- audio/voice pode ser enviado como voice note nativa do Telegram;
 - baixa arquivo temporario com limite de tamanho;
 - transport=bot usa TelegramButtonPublisher.send_file;
 - transport=session usa a sessao Telethon dona da tarefa;
