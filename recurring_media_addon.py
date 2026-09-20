@@ -1,8 +1,9 @@
-"""Suporte de imagem/video para mensagens recorrentes (bot e sessao).
+"""Suporte de imagem/video/audio para mensagens recorrentes (bot e sessao).
 
 Estende o scheduler existente sem criar outro relogio:
 - media_url opcional (HTTPS);
-- media_type: image|video;
+- media_type: image|video|audio|voice;
+- audio/voice pode ser enviado como voice note nativa do Telegram;
 - baixa arquivo temporario com limite de tamanho;
 - transport=bot usa TelegramButtonPublisher.send_file;
 - transport=session usa a sessao Telethon dona da tarefa;
@@ -33,7 +34,7 @@ _original_process_one = None
 _original_config_signature = None
 
 DEFAULT_MAX_MEDIA_MB = 80
-ALLOWED_MEDIA_TYPES = {"image", "video"}
+ALLOWED_MEDIA_TYPES = {"image", "video", "audio", "voice"}
 
 
 def _media_url(item):
@@ -53,8 +54,24 @@ def _media_type(item):
         "img": "image",
         "video": "video",
         "mp4": "video",
+        "audio": "audio",
+        "mp3": "audio",
+        "m4a": "audio",
+        "ogg": "voice",
+        "opus": "voice",
+        "voice": "voice",
+        "voice_note": "voice",
+        "voice-message": "voice",
+        "voice_message": "voice",
     }
     return aliases.get(value, value)
+
+
+def _send_as_voice_note(item):
+    media_type = _media_type(item)
+    if "send_as_voice_note" in item:
+        return recurring._truthy(item.get("send_as_voice_note"), False)
+    return media_type in {"audio", "voice"}
 
 
 def _has_text(item):
@@ -131,6 +148,7 @@ def _config_signature(item):
         _media_url(item),
         _media_type(item),
         str(item.get("media_filename") or ""),
+        "voice=1" if _send_as_voice_note(item) else "voice=0",
     ])
     return f"{base}:media:{media_bits}"
 
@@ -167,6 +185,12 @@ def _suffix_for(item, response):
         return ".mp4"
     if "quicktime" in content_type:
         return ".mov"
+    if "ogg" in content_type or "opus" in content_type:
+        return ".ogg"
+    if "mpeg" in content_type or "mp3" in content_type:
+        return ".mp3"
+    if "mp4a" in content_type or "m4a" in content_type:
+        return ".m4a"
     return ".bin"
 
 
@@ -228,13 +252,36 @@ async def _send_bot_media(worker, item, destination, text, bot_key):
         send_config["telegram_bot_key"] = bot_key
         send_config.setdefault("buttons", item.get("buttons") or [])
         send_config.setdefault("buttons_enabled", item.get("buttons_enabled", True))
-        sent = await worker.button_publisher.send_file(
-            destination,
-            path,
-            text,
-            [],
-            send_config,
-        )
+        if _send_as_voice_note(item):
+            bot = worker.button_publisher._get_bot(send_config)
+            resolved = await worker.button_publisher._resolve_destination(
+                bot, destination
+            )
+            # Telethon envia como mensagem de voz nativa (bolha com waveform),
+            # nao como documento/arquivo anexado.
+            try:
+                import telegram_rich_text
+                entities = telegram_rich_text.build_entities(item, text or "")
+            except Exception:
+                entities = []
+            sent = await bot["client"].send_file(
+                resolved,
+                path,
+                caption=text or "",
+                formatting_entities=entities or [],
+                buttons=worker.button_publisher.build_keyboard(send_config),
+                voice_note=True,
+                supports_streaming=False,
+            )
+            worker.button_publisher._remember_destination_bot(destination, bot["key"])
+        else:
+            sent = await worker.button_publisher.send_file(
+                destination,
+                path,
+                text,
+                [],
+                send_config,
+            )
         return sent, size
     finally:
         try:
@@ -254,6 +301,7 @@ async def _send_session_media(worker, item, destination_id, text):
             path,
             caption=text or "",
             supports_streaming=_media_type(item) == "video",
+            voice_note=_send_as_voice_note(item),
         )
         return sent, size
     finally:
@@ -426,4 +474,4 @@ def register():
     recurring._config_signature = _config_signature
     recurring._process_one = _process_one
     _registered = True
-    print("[Recurring Media] suporte image/video registrado (chain-safe)")
+    print("[Recurring Media] suporte image/video/audio/voice registrado (chain-safe)")

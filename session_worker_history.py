@@ -22,6 +22,7 @@ import recurring_messages_addon
 import recurring_session_transport_addon
 import recurring_media_addon
 import recurring_rich_text_addon
+import recurring_rotation_addon
 import telegram_message_import_addon
 import runtime_safety
 import session_worker as base
@@ -214,6 +215,9 @@ album_buttons_addon.register(worker=worker, session_key=SESSION_KEY)
 recurring_session_transport_addon.register()
 recurring_media_addon.register()
 recurring_rich_text_addon.register(worker)
+# Rotacao entra por ultimo para que cada variante selecionada atravesse todas as
+# camadas anteriores (session/media/rich text) com seu proprio conteudo.
+recurring_rotation_addon.register()
 
 
 async def main():
