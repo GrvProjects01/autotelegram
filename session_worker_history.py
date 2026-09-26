@@ -220,24 +220,58 @@ recurring_rich_text_addon.register(worker)
 recurring_rotation_addon.register()
 
 
+async def _supervise(name, factory, restart_delay=5):
+    """Mantém loops auxiliares vivos mesmo se um deles falhar fora do próprio try.
+
+    O heartbeat do worker principal pode continuar online mesmo quando uma task
+    auxiliar morreu. Este supervisor impede que recorrência/importação/histórico
+    fiquem silenciosamente parados até o próximo deploy.
+    """
+    while True:
+        try:
+            print(f"[Supervisor:{SESSION_KEY}] iniciando {name}")
+            await factory()
+            print(
+                f"[Supervisor:{SESSION_KEY}] {name} encerrou inesperadamente; "
+                f"reiniciando em {restart_delay}s"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(
+                f"[Supervisor:{SESSION_KEY}] {name} caiu: "
+                f"{type(error).__name__}: {error}; reiniciando em {restart_delay}s"
+            )
+        await asyncio.sleep(max(1, int(restart_delay)))
+
+
 async def main():
     history_task = asyncio.create_task(
-        historical_backfill.run(
-            worker=worker,
-            load_automations=history_aware_load_automations,
-            session_key=SESSION_KEY,
+        _supervise(
+            "historical_backfill",
+            lambda: historical_backfill.run(
+                worker=worker,
+                load_automations=history_aware_load_automations,
+                session_key=SESSION_KEY,
+            ),
         )
     )
     recurring_task = asyncio.create_task(
-        recurring_messages_addon.run(
-            worker=worker,
-            session_key=SESSION_KEY,
+        _supervise(
+            "recurring_messages",
+            lambda: recurring_messages_addon.run(
+                worker=worker,
+                session_key=SESSION_KEY,
+            ),
         )
     )
     import_task = asyncio.create_task(
-        telegram_message_import_addon.run(
-            worker=worker,
-            session_key=SESSION_KEY,
+        _supervise(
+            "telegram_message_import",
+            lambda: telegram_message_import_addon.run(
+                worker=worker,
+                session_key=SESSION_KEY,
+            ),
         )
     )
 
