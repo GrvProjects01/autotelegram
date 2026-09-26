@@ -58,3 +58,16 @@ def test_store_persists_schedule(tmp_path):
     store.commit_send("abc", 10, "closeflix", None, None, now + 1800, now)
     state2 = store.get_or_create(item, now + 1)
     assert state2["last_message_id"] == "10"
+
+
+def test_default_state_path_is_isolated_per_session():
+    primary = recurring._default_state_path("primary")
+    marca_b = recurring._default_state_path("marca_b")
+    assert primary != marca_b
+    assert primary.endswith("recurring_messages_state_primary.sqlite3")
+    assert marca_b.endswith("recurring_messages_state_marca_b.sqlite3")
+
+
+def test_default_state_path_sanitizes_session_key():
+    path = recurring._default_state_path("Marca B / VIP")
+    assert path.endswith("recurring_messages_state_marca_b___vip.sqlite3")

@@ -389,13 +389,22 @@ async def _process_one(worker, store, item, session_key):
         await _report_state(worker, item, state, "error", error=error)
 
 
+def _default_state_path(session_key):
+    safe_key = str(session_key or DEFAULT_SESSION_KEY).strip().lower()
+    safe_key = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in safe_key)
+    safe_key = safe_key.strip("_.-") or DEFAULT_SESSION_KEY
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        f"recurring_messages_state_{safe_key}.sqlite3",
+    )
+
+
 async def run(worker, session_key, endpoint=DEFAULT_ENDPOINT, poll_seconds=DEFAULT_POLL_SECONDS):
+    # Cada sessão precisa de seu próprio SQLite. Antes, primary e marca_b podiam
+    # compartilhar o mesmo arquivo default, causando contenção/estado cruzado.
     state_path = os.getenv(
         "TELEGRAM_RECURRING_STATE_FILE",
-        os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "recurring_messages_state.sqlite3",
-        ),
+        _default_state_path(session_key),
     )
     store = RecurringStateStore(state_path)
     warned_endpoint = False
