@@ -98,7 +98,12 @@ def _merge_variant(parent, variant, index):
         merged.pop(field, None)
 
     for key, value in variant.items():
-        if key in {"enabled", "sort_order"}:
+        # O id do scheduler PRECISA continuar sendo o id da recurring_messages.
+        # Antes, o id da variante sobrescrevia o id do parent. O envio era
+        # commitado no SQLite sob o id da variante, enquanto o cursor era lido
+        # sob o id do parent; por isso o cursor nunca avançava e a variante 0
+        # era reenviada para sempre.
+        if key in {"id", "key", "enabled", "sort_order", "recurring_message_id"}:
             continue
         merged[key] = value
 
@@ -119,6 +124,7 @@ def _merge_variant(parent, variant, index):
 
     merged["_rotation_selected"] = True
     merged["_rotation_variant_key"] = _variant_key(variant, index)
+    merged["_rotation_variant_id"] = str(variant.get("id") or variant.get("key") or "")
     merged["_rotation_variant_index"] = int(index)
     # Mantem a colecao inteira para assinatura estavel.
     merged["rotation_items"] = _rotation_items(parent)
