@@ -73,11 +73,11 @@ def test_rotation_advances_only_after_confirmed_send(monkeypatch):
     calls = []
 
     async def fake_process(_worker, store, item, _session_key):
-        calls.append(item["_rotation_variant_key"])
+        calls.append((item["id"], item["_rotation_variant_key"]))
         with sqlite3.connect(store.path) as db:
             db.execute(
-                "UPDATE recurring_message_state SET last_sent_at=?, updated_at=? WHERE recurring_id='r1'",
-                (time.time(), time.time()),
+                "UPDATE recurring_message_state SET last_sent_at=?, updated_at=? WHERE recurring_id=?",
+                (time.time(), time.time(), str(item["id"])),
             )
             db.commit()
 
@@ -102,13 +102,13 @@ def test_rotation_advances_only_after_confirmed_send(monkeypatch):
         import asyncio
         asyncio.run(rotation._process_one(SimpleNamespace(), store, item, "primary"))
         cursor, key, _ = rotation._read_rotation_state(store, "r1")
-        assert calls == ["m1"]
+        assert calls == [("r1", "m1")]
         assert cursor == 1
         assert key == "m1"
 
         asyncio.run(rotation._process_one(SimpleNamespace(), store, item, "primary"))
         cursor, key, _ = rotation._read_rotation_state(store, "r1")
-        assert calls == ["m1", "m2"]
+        assert calls == [("r1", "m1"), ("r1", "m2")]
         assert cursor == 0
         assert key == "m2"
     finally:
@@ -153,3 +153,26 @@ def test_rotation_does_not_advance_when_send_not_committed():
             os.remove(path)
         except OSError:
             pass
+
+
+def test_merge_variant_preserves_parent_recurring_id():
+    parent = {
+        "id": "recurring-parent",
+        "rotation_enabled": True,
+        "rotation_items": [],
+        "message_text": "legacy",
+    }
+    variant = {
+        "id": "variant-child",
+        "recurring_message_id": "recurring-parent",
+        "sort_order": 0,
+        "kind": "text",
+        "message_text": "rotated",
+    }
+
+    merged = rotation._merge_variant(parent, variant, 0)
+
+    assert merged["id"] == "recurring-parent"
+    assert merged["_rotation_variant_id"] == "variant-child"
+    assert merged["_rotation_variant_key"] == "variant-child"
+    assert merged["message_text"] == "rotated"
