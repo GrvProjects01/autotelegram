@@ -12,6 +12,7 @@ Objetivos:
 Esta camada é deliberadamente aditiva e não altera contratos Lovable/Supabase.
 """
 
+import asyncio
 import os
 import re
 import tempfile
@@ -89,7 +90,7 @@ def _metadata_diff(expected, actual):
     if not isinstance(expected, dict) or not isinstance(actual, dict):
         return []
     mismatches = []
-    for key in ("mime_type", "width", "height"):
+    for key in ("mime_type", "width", "height", "size"):
         left = expected.get(key)
         right = actual.get(key)
         if left not in (None, "") and right not in (None, "") and left != right:
@@ -125,6 +126,65 @@ async def _fetch_single(client, destination, message_id):
         return await client.get_messages(destination, ids=int(message_id))
     except Exception:
         return None
+
+
+def _has_media_payload(message):
+    if message is None:
+        return False
+    media = getattr(message, "media", None)
+    if media is None:
+        return False
+    return bool(
+        getattr(media, "document", None) is not None
+        or getattr(media, "photo", None) is not None
+    )
+
+
+def _integrity_problem(expected_meta, actual):
+    if not _has_media_payload(actual):
+        return "telegram_refetch_sem_midia"
+
+    if isinstance(expected_meta, dict):
+        actual_meta = _metadata_from_media(actual)
+        expected_size = expected_meta.get("size")
+        if expected_size not in (None, ""):
+            if not isinstance(actual_meta, dict) or actual_meta.get("size") in (None, ""):
+                return "telegram_refetch_sem_tamanho"
+            try:
+                if int(actual_meta["size"]) != int(expected_size):
+                    return (
+                        f"tamanho_remoto_divergente:"
+                        f"{actual_meta['size']}!={expected_size}"
+                    )
+            except (TypeError, ValueError):
+                return "tamanho_remoto_invalido"
+    return None
+
+
+async def _refetch_until_media_ready(client, destination, sent, expected_meta=None):
+    sent_id = getattr(sent, "id", None)
+    actual = sent
+    problem = _integrity_problem(expected_meta, actual)
+    for attempt in range(3):
+        persisted = await _fetch_single(client, destination, sent_id)
+        if persisted is not None:
+            actual = persisted
+        problem = _integrity_problem(expected_meta, actual)
+        if problem is None:
+            return actual, None
+        if attempt < 2:
+            await asyncio.sleep(1 + attempt)
+    return actual, problem
+
+
+async def _delete_failed_upload(client, destination, sent):
+    sent_id = getattr(sent, "id", None)
+    if not sent_id:
+        return
+    try:
+        await client.delete_messages(destination, [int(sent_id)], revoke=True)
+    except Exception:
+        pass
 
 
 def register(worker, session_key="primary"):
@@ -287,6 +347,14 @@ def register(worker, session_key="primary"):
         entities,
         automation,
     ):
+        bot = publisher._get_bot(automation)
+        destination = await publisher._resolve_destination(bot, destination_chat_id)
+        expected_meta = (
+            automation.get("_source_media_metadata")
+            if isinstance(automation, dict)
+            else None
+        )
+
         sent = await previous_publisher_send_file(
             destination_chat_id,
             file_path,
@@ -294,11 +362,33 @@ def register(worker, session_key="primary"):
             entities,
             automation,
         )
-        bot = publisher._get_bot(automation)
-        destination = await publisher._resolve_destination(bot, destination_chat_id)
-        sent_id = getattr(sent, "id", None)
-        persisted = await _fetch_single(bot["client"], destination, sent_id)
-        actual = persisted or sent
+        actual, media_problem = await _refetch_until_media_ready(
+            bot["client"], destination, sent, expected_meta
+        )
+
+        if media_problem:
+            print(
+                f"[MEDIA_RETRY:{session_key}] BOT bot={bot['key']} "
+                f"msg={getattr(sent, 'id', None)} motivo={media_problem}"
+            )
+            await _delete_failed_upload(bot["client"], destination, sent)
+            sent = await previous_publisher_send_file(
+                destination_chat_id,
+                file_path,
+                caption,
+                entities,
+                automation,
+            )
+            actual, media_problem = await _refetch_until_media_ready(
+                bot["client"], destination, sent, expected_meta
+            )
+            if media_problem:
+                await _delete_failed_upload(bot["client"], destination, sent)
+                raise RuntimeError(
+                    f"Telegram persistiu midia invalida apos retry: {media_problem}"
+                )
+
+        sent_id = getattr(actual, "id", None) or getattr(sent, "id", None)
 
         expected_caption = _text(caption)
         actual_caption = _text(getattr(actual, "message", ""))
@@ -319,7 +409,6 @@ def register(worker, session_key="primary"):
                     f"actual_len={len(actual_caption)}"
                 )
 
-        expected_meta = automation.get("_source_media_metadata") if isinstance(automation, dict) else None
         actual_meta = _metadata_from_media(actual)
         mismatches = _metadata_diff(expected_meta, actual_meta)
         if mismatches:
@@ -346,7 +435,10 @@ def register(worker, session_key="primary"):
     async def verified_session_send_file(entity, file, *args, **kwargs):
         is_album = isinstance(file, (list, tuple))
         source_meta = None
-        if not is_album:
+        source_metas = []
+        if is_album:
+            source_metas = [_metadata_from_media(item) for item in file]
+        else:
             source_meta = _metadata_from_media(file)
             if source_meta:
                 if source_meta.get("attributes"):
@@ -359,14 +451,62 @@ def register(worker, session_key="primary"):
 
         sent = await previous_session_send_file(entity, file, *args, **kwargs)
         if isinstance(sent, (list, tuple)):
+            failures = []
+            verified = []
+            for index, sent_item in enumerate(sent):
+                expected = source_metas[index] if index < len(source_metas) else None
+                actual_item, problem = await _refetch_until_media_ready(
+                    worker.client, entity, sent_item, expected
+                )
+                verified.append(actual_item)
+                if problem:
+                    failures.append((sent_item, problem))
+            if failures:
+                print(
+                    f"[MEDIA_RETRY:{session_key}] SESSION album "
+                    f"falhas={len(failures)}/{len(sent)}"
+                )
+                for sent_item in sent:
+                    await _delete_failed_upload(worker.client, entity, sent_item)
+                retried = await previous_session_send_file(entity, file, *args, **kwargs)
+                retried_list = list(retried) if isinstance(retried, (list, tuple)) else [retried]
+                for index, sent_item in enumerate(retried_list):
+                    expected = source_metas[index] if index < len(source_metas) else None
+                    _, problem = await _refetch_until_media_ready(
+                        worker.client, entity, sent_item, expected
+                    )
+                    if problem:
+                        for cleanup in retried_list:
+                            await _delete_failed_upload(worker.client, entity, cleanup)
+                        raise RuntimeError(
+                            f"Telegram persistiu album invalido apos retry: {problem}"
+                        )
+                return retried
             print(
                 f"[Media Verify:{session_key}] SESSION album OK itens={len(sent)}"
             )
             return sent
 
-        sent_id = getattr(sent, "id", None)
-        persisted = await _fetch_single(worker.client, entity, sent_id)
-        actual = persisted or sent
+        actual, media_problem = await _refetch_until_media_ready(
+            worker.client, entity, sent, source_meta
+        )
+        if media_problem:
+            print(
+                f"[MEDIA_RETRY:{session_key}] SESSION "
+                f"msg={getattr(sent, 'id', None)} motivo={media_problem}"
+            )
+            await _delete_failed_upload(worker.client, entity, sent)
+            sent = await previous_session_send_file(entity, file, *args, **kwargs)
+            actual, media_problem = await _refetch_until_media_ready(
+                worker.client, entity, sent, source_meta
+            )
+            if media_problem:
+                await _delete_failed_upload(worker.client, entity, sent)
+                raise RuntimeError(
+                    f"Telegram persistiu midia invalida apos retry: {media_problem}"
+                )
+
+        sent_id = getattr(actual, "id", None) or getattr(sent, "id", None)
 
         expected_caption = _text(kwargs.get("caption") or "")
         actual_caption = _text(getattr(actual, "message", ""))
