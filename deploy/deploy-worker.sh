@@ -126,4 +126,29 @@ check_service telegram-worker@marca_b
 
 log "processos ativos"
 pgrep -af 'session_worker_history.py|session_worker.py|worker.py' || true
+
+log "snapshot de recursos"
+df -h "$PROJECT_DIR" || true
+free -m || true
+du -sh "$PROJECT_DIR/../tmp" 2>/dev/null || true
+
+log "ultimos eventos de midia - primary"
+if [[ "$(id -u)" -eq 0 ]]; then
+  journalctl -u telegram-worker@primary -n 250 --no-pager 2>/dev/null \
+    | grep -Ei 'media|preview|download|upload|integrity|fail|error|exception|killed|oom' \
+    | tail -n 120 || true
+  log "ultimos eventos de midia - marca_b"
+  journalctl -u telegram-worker@marca_b -n 250 --no-pager 2>/dev/null \
+    | grep -Ei 'media|preview|download|upload|integrity|fail|error|exception|killed|oom' \
+    | tail -n 120 || true
+else
+  sudo journalctl -u telegram-worker@primary -n 250 --no-pager 2>/dev/null \
+    | grep -Ei 'media|preview|download|upload|integrity|fail|error|exception|killed|oom' \
+    | tail -n 120 || true
+  log "ultimos eventos de midia - marca_b"
+  sudo journalctl -u telegram-worker@marca_b -n 250 --no-pager 2>/dev/null \
+    | grep -Ei 'media|preview|download|upload|integrity|fail|error|exception|killed|oom' \
+    | tail -n 120 || true
+fi
+
 log "DEPLOY OK sha=$DEPLOY_SHA"
