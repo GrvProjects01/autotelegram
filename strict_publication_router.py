@@ -75,6 +75,7 @@ def _source_media_metadata(message):
         "attributes": attributes,
         "mime_type": mime_type,
         "is_video": is_video,
+        "size": int(getattr(document, "size", 0) or 0) or None,
     }
 
 
