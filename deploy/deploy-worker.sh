@@ -86,6 +86,33 @@ if [[ -x "$VENV_DIR/bin/pytest" ]]; then
   fi
 fi
 
+log "diagnostico pre-restart dos workers"
+for service in telegram-worker@primary telegram-worker@marca_b; do
+  log "pre-restart $service"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    systemctl show "$service" -p ActiveState -p SubState -p NRestarts -p ExecMainStatus -p ExecMainStartTimestamp -p ActiveEnterTimestamp --no-pager 2>/dev/null || true
+    journalctl -u "$service" --since "90 minutes ago" --no-pager 2>/dev/null \
+      | grep -Ei 'heartbeat|http resilience|timeout|connect|disconnect|error|exception|traceback|killed|oom|failed|reconnect|flood|server|network' \
+      | tail -n 220 || true
+  else
+    sudo systemctl show "$service" -p ActiveState -p SubState -p NRestarts -p ExecMainStatus -p ExecMainStartTimestamp -p ActiveEnterTimestamp --no-pager 2>/dev/null || true
+    sudo journalctl -u "$service" --since "90 minutes ago" --no-pager 2>/dev/null \
+      | grep -Ei 'heartbeat|http resilience|timeout|connect|disconnect|error|exception|traceback|killed|oom|failed|reconnect|flood|server|network' \
+      | tail -n 220 || true
+  fi
+done
+
+log "diagnostico kernel/oom pre-restart"
+if [[ "$(id -u)" -eq 0 ]]; then
+  journalctl -k --since "90 minutes ago" --no-pager 2>/dev/null \
+    | grep -Ei 'oom|out of memory|killed process|segfault|network|eth0|nvme|ext4' \
+    | tail -n 120 || true
+else
+  sudo journalctl -k --since "90 minutes ago" --no-pager 2>/dev/null \
+    | grep -Ei 'oom|out of memory|killed process|segfault|network|eth0|nvme|ext4' \
+    | tail -n 120 || true
+fi
+
 log "instalando template systemd"
 if [[ "$(id -u)" -eq 0 ]]; then
   cp "$SERVICE_TEMPLATE_SRC" "$SERVICE_TEMPLATE_DST"
