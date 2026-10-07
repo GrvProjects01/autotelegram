@@ -70,6 +70,22 @@ def _safe_to_retry(method, path, worker):
     return path == worker.HEARTBEAT_ENDPOINT
 
 
+def _transient_auth_failure(response):
+    """401 pode ser falha transitória de banco no autenticador do backend.
+
+    O endpoint devolve {reason: "db_error"} quando a secret não pôde ser
+    validada porque o banco falhou. Isso não é credencial inválida e deve ser
+    tentado novamente; hash_mismatch/missing_header continuam fail-fast.
+    """
+    if int(response.status_code) != 401:
+        return False
+    try:
+        payload = response.json()
+    except Exception:
+        return False
+    return str(payload.get("reason") or "").strip() == "db_error"
+
+
 def _request_was_not_sent(error):
     return isinstance(
         error,
@@ -110,7 +126,12 @@ async def _perform_request(worker, path, method="GET", data=None):
 async def _resilient_request(worker, session_key, path, method="GET", data=None):
     method = str(method or "GET").upper()
     safe_retry = _safe_to_retry(method, path, worker)
-    max_attempts = 3 if safe_retry else 2
+    # Heartbeat é idempotente e crítico para o painel. Dá mais margem para
+    # falhas curtas do backend sem marcar o worker como offline.
+    if path == worker.HEARTBEAT_ENDPOINT:
+        max_attempts = 5
+    else:
+        max_attempts = 3 if safe_retry else 2
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -118,7 +139,13 @@ async def _resilient_request(worker, session_key, path, method="GET", data=None)
 
         except httpx.HTTPStatusError as error:
             status = int(error.response.status_code)
-            retryable_status = status in {502, 503, 504} and safe_retry
+            retryable_status = (
+                safe_retry
+                and (
+                    status in {500, 502, 503, 504}
+                    or _transient_auth_failure(error.response)
+                )
+            )
             if not retryable_status or attempt >= max_attempts:
                 print(
                     f"[HTTP Resilience:{session_key}] HTTP {status} "
@@ -135,7 +162,7 @@ async def _resilient_request(worker, session_key, path, method="GET", data=None)
                 )
                 raise
 
-        delay = 0.5 * (2 ** (attempt - 1))
+        delay = min(8.0, 0.5 * (2 ** (attempt - 1)))
         print(
             f"[HTTP Resilience:{session_key}] retry {method} {path} "
             f"em {delay:.1f}s tentativa={attempt + 1}/{max_attempts}"

@@ -690,13 +690,27 @@ async def send_heartbeat():
 
 
 async def heartbeat_loop():
+    """Heartbeat adaptativo.
+
+    Em sucesso mantém o intervalo normal. Em falha de backend/rede, tenta de
+    novo em 10s em vez de ficar 60s silencioso. Isso reduz falso "offline" no
+    painel sem gerar tempestade de requests, pois http_resilience já aplica
+    retry/backoff dentro de cada tentativa.
+    """
     while True:
+        delay = HEARTBEAT_INTERVAL
         try:
             await send_heartbeat()
         except Exception as error:
-            print("[Heartbeat] erro:", type(error).__name__, str(error))
+            delay = 10
+            print(
+                "[Heartbeat] erro:",
+                type(error).__name__,
+                str(error),
+                f"| retry_em={delay}s",
+            )
 
-        await asyncio.sleep(HEARTBEAT_INTERVAL)
+        await asyncio.sleep(delay)
 
 
 # ============================================================
