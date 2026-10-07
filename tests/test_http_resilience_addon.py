@@ -101,3 +101,23 @@ def test_cold_start_backend_failure_returns_empty_instead_of_crashing(monkeypatc
 
     result = asyncio.run(base._original_load_automations(force_refresh=True))
     assert result == []
+
+
+def test_transient_auth_db_error_is_retryable():
+    request = httpx.Request("POST", "https://example.invalid/heartbeat")
+    response = httpx.Response(
+        401,
+        request=request,
+        json={"error": "Unauthorized", "reason": "db_error"},
+    )
+    assert addon._transient_auth_failure(response) is True
+
+
+def test_real_auth_mismatch_is_not_retryable():
+    request = httpx.Request("POST", "https://example.invalid/heartbeat")
+    response = httpx.Response(
+        401,
+        request=request,
+        json={"error": "Unauthorized", "reason": "hash_mismatch"},
+    )
+    assert addon._transient_auth_failure(response) is False
