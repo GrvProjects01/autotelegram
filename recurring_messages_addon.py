@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 DEFAULT_ENDPOINT = "/api/public/worker/recurring-messages"
 STATE_ENDPOINT = "/api/public/worker/recurring-messages/state"
-DEFAULT_POLL_SECONDS = 15
+DEFAULT_POLL_SECONDS = int(os.getenv("TELEGRAM_RECURRING_POLL_SECONDS", "30"))
 DEFAULT_SESSION_KEY = "primary"
 MIN_INTERVAL_MINUTES = 1
 MAX_INTERVAL_MINUTES = 7 * 24 * 60
