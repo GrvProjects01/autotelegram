@@ -13,6 +13,7 @@ has_media/media_kind para o painel pedir upload pelo fluxo de Storage existente.
 """
 
 import asyncio
+import os
 import re
 import time
 from urllib.parse import urlparse
@@ -22,7 +23,7 @@ from telethon import types
 
 IMPORTS_ENDPOINT = "/api/public/worker/recurring-message-imports"
 RESULT_ENDPOINT = "/api/public/worker/recurring-message-imports/result"
-DEFAULT_POLL_SECONDS = 5
+DEFAULT_POLL_SECONDS = int(os.getenv("TELEGRAM_IMPORT_POLL_SECONDS", "30"))
 MAX_RESULTS_PER_POLL = 10
 
 
