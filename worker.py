@@ -35,6 +35,7 @@ API_ID = int(os.environ["TELEGRAM_API_ID"])
 API_HASH = os.environ["TELEGRAM_API_HASH"]
 
 LOVABLE_API_URL = os.environ["LOVABLE_API_URL"].rstrip("/")
+WORKER_API_URL = os.getenv("WORKER_API_URL", LOVABLE_API_URL).rstrip("/")
 WORKER_SECRET = os.environ["LOVABLE_WORKER_SECRET"]
 
 SESSION_NAME = os.getenv(
@@ -52,8 +53,8 @@ WORKER_VERSION = "1.5.0-inline-buttons"
 # Diagnóstico dos updates recebidos do Telegram.
 EVENT_DEBUG = os.getenv("TELEGRAM_EVENT_DEBUG", "1").strip() == "1"
 
-HEARTBEAT_INTERVAL = 60
-CHAT_SYNC_INTERVAL = 15 * 60
+HEARTBEAT_INTERVAL = int(os.getenv("TELEGRAM_HEARTBEAT_INTERVAL", "60"))
+CHAT_SYNC_INTERVAL = int(os.getenv("TELEGRAM_CHAT_SYNC_INTERVAL", str(15 * 60)))
 
 # ============================================================
 # AJUSTES DE PRODUÇÃO / MEMÓRIA
@@ -540,7 +541,7 @@ async def lovable_request(
         "Content-Type": "application/json"
     }
 
-    url = f"{LOVABLE_API_URL}{path}"
+    url = f"{WORKER_API_URL}{path}"
     http = await get_http_client()
 
     try:
