@@ -201,7 +201,7 @@ def register(*, worker, base, session_key):
         return
     _REGISTERED = True
 
-    ttl = _env_int("TELEGRAM_AUTOMATIONS_CACHE_TTL", 20, 5, 300)
+    ttl = _env_int("TELEGRAM_AUTOMATIONS_CACHE_TTL", 45, 5, 300)
     stale_grace = _env_int("TELEGRAM_AUTOMATIONS_STALE_GRACE", 30, 5, 300)
     worker.AUTOMATIONS_CACHE_TTL = ttl
     _AUTOMATIONS_LOCK = asyncio.Lock()
