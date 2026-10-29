@@ -180,7 +180,7 @@ print(f"[Probe] ROCFORT API body={response.text[:1200]}")
 response.raise_for_status()
 PY
 
-log "diagnostico pos-restart da API - primary"
+log "diagnostico pos-restart da API v2 - primary"
 if [[ "$(id -u)" -eq 0 ]]; then
   journalctl -u telegram-worker@primary --since "3 minutes ago" --no-pager 2>/dev/null \
     | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
