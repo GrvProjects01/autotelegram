@@ -106,7 +106,7 @@ async def _perform_request(worker, path, method="GET", data=None):
         "x-worker-secret": worker.WORKER_SECRET,
         "Content-Type": "application/json",
     }
-    url = f"{worker.LOVABLE_API_URL}{path}"
+    url = f"{worker.WORKER_API_URL}{path}"
 
     if method == "POST":
         response = await client.post(url, json=data, headers=headers)
