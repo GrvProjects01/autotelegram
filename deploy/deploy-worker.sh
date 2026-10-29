@@ -152,7 +152,7 @@ check_service() {
 check_service telegram-worker@primary
 check_service telegram-worker@marca_b
 
-log "probe de cutover ROCFORT API"
+log "probe de cutover ROCFORT API v2"
 run_as_deploy_user "$VENV_DIR/bin/python" - <<'PY'
 from pathlib import Path
 from dotenv import dotenv_values
