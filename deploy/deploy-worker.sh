@@ -152,6 +152,34 @@ check_service() {
 check_service telegram-worker@primary
 check_service telegram-worker@marca_b
 
+log "probe de cutover ROCFORT API"
+run_as_deploy_user "$VENV_DIR/bin/python" - <<'PY'
+from pathlib import Path
+from dotenv import dotenv_values
+import httpx
+
+project = Path("/home/ubuntu/autotelegram/autotelegram")
+config = {}
+for env_path in [project / ".env", project / "sessions" / "primary.env"]:
+    if env_path.exists():
+        config.update({k: v for k, v in dotenv_values(env_path).items() if v is not None})
+
+secret = config.get("LOVABLE_WORKER_SECRET")
+url = "https://telegram-channel-automator-theta.vercel.app/api/public/worker/diagnostics"
+
+if not secret:
+    raise SystemExit("[Probe] LOVABLE_WORKER_SECRET ausente nos arquivos de ambiente")
+
+response = httpx.get(
+    url,
+    headers={"x-worker-secret": secret, "accept": "application/json"},
+    timeout=20.0,
+)
+print(f"[Probe] ROCFORT API status={response.status_code}")
+print(f"[Probe] ROCFORT API body={response.text[:1200]}")
+response.raise_for_status()
+PY
+
 log "processos ativos"
 pgrep -af 'session_worker_history.py|session_worker.py|worker.py' || true
 
