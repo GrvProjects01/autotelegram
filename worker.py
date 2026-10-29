@@ -34,8 +34,11 @@ load_dotenv()
 API_ID = int(os.environ["TELEGRAM_API_ID"])
 API_HASH = os.environ["TELEGRAM_API_HASH"]
 
-LOVABLE_API_URL = os.environ["LOVABLE_API_URL"].rstrip("/")
-WORKER_API_URL = os.getenv("WORKER_API_URL", LOVABLE_API_URL).rstrip("/")
+LOVABLE_API_URL = os.getenv("LOVABLE_API_URL", "").rstrip("/")
+WORKER_API_URL = os.getenv(
+    "ROCFORT_API_URL",
+    "https://telegram-channel-automator-theta.vercel.app"
+).rstrip("/")
 WORKER_SECRET = os.environ["LOVABLE_WORKER_SECRET"]
 
 SESSION_NAME = os.getenv(
