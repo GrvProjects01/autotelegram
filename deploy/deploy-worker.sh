@@ -180,6 +180,25 @@ print(f"[Probe] ROCFORT API body={response.text[:1200]}")
 response.raise_for_status()
 PY
 
+log "diagnostico pos-restart da API - primary"
+if [[ "$(id -u)" -eq 0 ]]; then
+  journalctl -u telegram-worker@primary --since "3 minutes ago" --no-pager 2>/dev/null \
+    | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
+    | tail -n 120 || true
+  log "diagnostico pos-restart da API - marca_b"
+  journalctl -u telegram-worker@marca_b --since "3 minutes ago" --no-pager 2>/dev/null \
+    | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
+    | tail -n 120 || true
+else
+  sudo journalctl -u telegram-worker@primary --since "3 minutes ago" --no-pager 2>/dev/null \
+    | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
+    | tail -n 120 || true
+  log "diagnostico pos-restart da API - marca_b"
+  sudo journalctl -u telegram-worker@marca_b --since "3 minutes ago" --no-pager 2>/dev/null \
+    | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
+    | tail -n 120 || true
+fi
+
 log "processos ativos"
 pgrep -af 'session_worker_history.py|session_worker.py|worker.py' || true
 
