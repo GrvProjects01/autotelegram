@@ -444,13 +444,23 @@ class TelegramButtonPublisher:
     async def send_file(self, destination_chat_id, file_path, caption, entities, automation):
         bot = self._get_bot(automation)
         destination = await self._resolve_destination(bot, destination_chat_id)
+        send_kwargs = {
+            "caption": caption or "",
+            "formatting_entities": entities or [],
+            "buttons": self.build_keyboard(automation),
+            "supports_streaming": True,
+            "force_document": False,
+        }
+        thumb_path = None
+        if isinstance(automation, dict):
+            thumb_path = str(automation.get("_generated_video_thumb") or "").strip()
+        if thumb_path and os.path.exists(thumb_path):
+            send_kwargs["thumb"] = thumb_path
+
         result = await bot["client"].send_file(
             destination,
             file_path,
-            caption=caption or "",
-            formatting_entities=entities or [],
-            buttons=self.build_keyboard(automation),
-            supports_streaming=True,
+            **send_kwargs,
         )
         self._remember_destination_bot(destination_chat_id, bot["key"])
         return result
