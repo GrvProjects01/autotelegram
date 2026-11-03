@@ -18,6 +18,7 @@ perdida pela camada de midia.
 
 import ipaddress
 import os
+import subprocess
 import tempfile
 from urllib.parse import urlparse
 
@@ -245,8 +246,101 @@ async def _download_media(item):
                 raise
 
 
+def _generate_video_thumbnail(video_path):
+    """Gera uma thumb JPEG local para videos enviados a partir do Storage.
+
+    Telegram exige thumbnail pequena; usamos ffmpeg empacotado por imageio-ffmpeg
+    para evitar depender do binario do sistema.
+    """
+    try:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as error:
+        print(f"[Recurring Media] thumbnail indisponivel: ffmpeg helper: {error}")
+        return None
+
+    fd, thumb_path = tempfile.mkstemp(prefix="recurring_thumb_", suffix=".jpg")
+    os.close(fd)
+
+    filters = "scale=320:320:force_original_aspect_ratio=decrease"
+    command = [
+        ffmpeg,
+        "-y",
+        "-ss", "0.2",
+        "-i", video_path,
+        "-frames:v", "1",
+        "-vf", filters,
+        "-q:v", "5",
+        "-an",
+        thumb_path,
+    ]
+
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0 or not os.path.exists(thumb_path):
+            detail = result.stderr.decode("utf-8", errors="ignore")[-500:]
+            print(f"[Recurring Media] falha gerando thumbnail: {detail}")
+            try:
+                os.remove(thumb_path)
+            except OSError:
+                pass
+            return None
+
+        size = os.path.getsize(thumb_path)
+        if size <= 0:
+            os.remove(thumb_path)
+            return None
+
+        # Telegram aceita thumbs pequenas; se passar de ~190 KB, reduzimos.
+        if size > 190 * 1024:
+            retry = [
+                ffmpeg,
+                "-y",
+                "-ss", "0.2",
+                "-i", video_path,
+                "-frames:v", "1",
+                "-vf", "scale=240:240:force_original_aspect_ratio=decrease",
+                "-q:v", "8",
+                "-an",
+                thumb_path,
+            ]
+            result = subprocess.run(
+                retry,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            if result.returncode != 0 or not os.path.exists(thumb_path):
+                try:
+                    os.remove(thumb_path)
+                except OSError:
+                    pass
+                return None
+
+        print(
+            f"[Recurring Media] thumbnail gerada: {os.path.basename(thumb_path)} "
+            f"bytes={os.path.getsize(thumb_path)}"
+        )
+        return thumb_path
+    except Exception as error:
+        print(f"[Recurring Media] thumbnail falhou: {type(error).__name__}: {error}")
+        try:
+            os.remove(thumb_path)
+        except OSError:
+            pass
+        return None
+
+
 async def _send_bot_media(worker, item, destination, text, bot_key):
     path, size = await _download_media(item)
+    thumb_path = None
     try:
         send_config = dict(item)
         send_config["telegram_bot_key"] = bot_key
@@ -275,6 +369,10 @@ async def _send_bot_media(worker, item, destination, text, bot_key):
             )
             worker.button_publisher._remember_destination_bot(destination, bot["key"])
         else:
+            if _media_type(item) == "video":
+                thumb_path = _generate_video_thumbnail(path)
+                if thumb_path:
+                    send_config["_generated_video_thumb"] = thumb_path
             sent = await worker.button_publisher.send_file(
                 destination,
                 path,
@@ -284,6 +382,11 @@ async def _send_bot_media(worker, item, destination, text, bot_key):
             )
         return sent, size
     finally:
+        if thumb_path:
+            try:
+                os.remove(thumb_path)
+            except OSError:
+                pass
         try:
             os.remove(path)
         except OSError:
