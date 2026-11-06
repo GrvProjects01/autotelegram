@@ -87,7 +87,7 @@ if [[ -x "$VENV_DIR/bin/pytest" ]]; then
 fi
 
 log "diagnostico pre-restart dos workers"
-for service in telegram-worker@primary telegram-worker@marca_b; do
+for service in telegram-worker@primary; do
   log "pre-restart $service"
   if [[ "$(id -u)" -eq 0 ]]; then
     systemctl show "$service" -p ActiveState -p SubState -p NRestarts -p ExecMainStatus -p ExecMainStartTimestamp -p ActiveEnterTimestamp --no-pager 2>/dev/null || true
@@ -118,16 +118,16 @@ if [[ "$(id -u)" -eq 0 ]]; then
   cp "$SERVICE_TEMPLATE_SRC" "$SERVICE_TEMPLATE_DST"
   systemctl daemon-reload
   systemctl disable --now telegram-worker 2>/dev/null || true
-  systemctl reset-failed telegram-worker@primary telegram-worker@marca_b 2>/dev/null || true
+  systemctl disable --now telegram-worker@marca_b 2>/dev/null || true
+  systemctl reset-failed telegram-worker@primary 2>/dev/null || true
   systemctl restart telegram-worker@primary
-  systemctl restart telegram-worker@marca_b
 else
   sudo cp "$SERVICE_TEMPLATE_SRC" "$SERVICE_TEMPLATE_DST"
   sudo systemctl daemon-reload
   sudo systemctl disable --now telegram-worker 2>/dev/null || true
-  sudo systemctl reset-failed telegram-worker@primary telegram-worker@marca_b 2>/dev/null || true
+  sudo systemctl disable --now telegram-worker@marca_b 2>/dev/null || true
+  sudo systemctl reset-failed telegram-worker@primary 2>/dev/null || true
   sudo systemctl restart telegram-worker@primary
-  sudo systemctl restart telegram-worker@marca_b
 fi
 
 log "aguardando workers estabilizarem"
@@ -150,7 +150,6 @@ check_service() {
 }
 
 check_service telegram-worker@primary
-check_service telegram-worker@marca_b
 
 log "probe de cutover ROCFORT API v2"
 run_as_deploy_user "$VENV_DIR/bin/python" - <<'PY'
@@ -185,16 +184,8 @@ if [[ "$(id -u)" -eq 0 ]]; then
   journalctl -u telegram-worker@primary --since "3 minutes ago" --no-pager 2>/dev/null \
     | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
     | tail -n 120 || true
-  log "diagnostico pos-restart da API - marca_b"
-  journalctl -u telegram-worker@marca_b --since "3 minutes ago" --no-pager 2>/dev/null \
-    | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
-    | tail -n 120 || true
 else
   sudo journalctl -u telegram-worker@primary --since "3 minutes ago" --no-pager 2>/dev/null \
-    | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
-    | tail -n 120 || true
-  log "diagnostico pos-restart da API - marca_b"
-  sudo journalctl -u telegram-worker@marca_b --since "3 minutes ago" --no-pager 2>/dev/null \
     | grep -Ei '\[Config\]|\[Heartbeat\]|\[Lovable\]|HTTP|conexão|erro|exception|traceback' \
     | tail -n 120 || true
 fi
@@ -212,16 +203,8 @@ if [[ "$(id -u)" -eq 0 ]]; then
   journalctl -u telegram-worker@primary -n 250 --no-pager 2>/dev/null \
     | grep -Ei 'media|preview|download|upload|integrity|fail|error|exception|killed|oom' \
     | tail -n 120 || true
-  log "ultimos eventos de midia - marca_b"
-  journalctl -u telegram-worker@marca_b -n 250 --no-pager 2>/dev/null \
-    | grep -Ei 'media|preview|download|upload|integrity|fail|error|exception|killed|oom' \
-    | tail -n 120 || true
 else
   sudo journalctl -u telegram-worker@primary -n 250 --no-pager 2>/dev/null \
-    | grep -Ei 'media|preview|download|upload|integrity|fail|error|exception|killed|oom' \
-    | tail -n 120 || true
-  log "ultimos eventos de midia - marca_b"
-  sudo journalctl -u telegram-worker@marca_b -n 250 --no-pager 2>/dev/null \
     | grep -Ei 'media|preview|download|upload|integrity|fail|error|exception|killed|oom' \
     | tail -n 120 || true
 fi
