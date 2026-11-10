@@ -24,6 +24,7 @@ from telethon import types
 IMPORTS_ENDPOINT = "/api/public/worker/recurring-message-imports"
 RESULT_ENDPOINT = "/api/public/worker/recurring-message-imports/result"
 DEFAULT_POLL_SECONDS = int(os.getenv("TELEGRAM_IMPORT_POLL_SECONDS", "30"))
+MAX_IDLE_POLL_SECONDS = int(os.getenv("TELEGRAM_IMPORT_MAX_IDLE_POLL_SECONDS", "120"))
 MAX_RESULTS_PER_POLL = 10
 
 
@@ -263,6 +264,7 @@ async def run(worker, session_key, poll_seconds=DEFAULT_POLL_SECONDS):
     """Loop de fila. Falha/404 do endpoint nao derruba o worker principal."""
     recent = {}
     warned_endpoint = False
+    current_poll_seconds = max(5, int(poll_seconds))
 
     print(f"[Telegram Import:{session_key}] fila ativa endpoint={IMPORTS_ENDPOINT}")
 
@@ -282,6 +284,14 @@ async def run(worker, session_key, poll_seconds=DEFAULT_POLL_SECONDS):
                 and _belongs_to_session(job, session_key)
                 and _job_id(job)
             ][:MAX_RESULTS_PER_POLL]
+
+            if jobs:
+                current_poll_seconds = max(5, int(poll_seconds))
+            else:
+                current_poll_seconds = min(
+                    max(current_poll_seconds * 2, int(poll_seconds)),
+                    max(int(poll_seconds), int(MAX_IDLE_POLL_SECONDS)),
+                )
 
             for job in jobs:
                 job_id = _job_id(job)
@@ -326,4 +336,4 @@ async def run(worker, session_key, poll_seconds=DEFAULT_POLL_SECONDS):
                 )
                 warned_endpoint = True
 
-        await asyncio.sleep(max(3, int(poll_seconds)))
+        await asyncio.sleep(max(5, int(current_poll_seconds)))
