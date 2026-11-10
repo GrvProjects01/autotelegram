@@ -53,7 +53,7 @@ WORKER_VERSION = "1.5.0-inline-buttons"
 # Diagnóstico dos updates recebidos do Telegram.
 EVENT_DEBUG = os.getenv("TELEGRAM_EVENT_DEBUG", "1").strip() == "1"
 
-HEARTBEAT_INTERVAL = int(os.getenv("TELEGRAM_HEARTBEAT_INTERVAL", "60"))
+HEARTBEAT_INTERVAL = int(os.getenv("TELEGRAM_HEARTBEAT_INTERVAL", "120"))
 CHAT_SYNC_INTERVAL = int(os.getenv("TELEGRAM_CHAT_SYNC_INTERVAL", str(15 * 60)))
 
 # ============================================================
@@ -69,7 +69,7 @@ CACHE_MAINTENANCE_INTERVAL = 5 * 60
 MEDIA_SEND_CONCURRENCY = 1
 
 SOURCE_RECOVERY_INTERVAL = int(
-    os.getenv("TELEGRAM_SOURCE_RECOVERY_INTERVAL", "15")
+    os.getenv("TELEGRAM_SOURCE_RECOVERY_INTERVAL", "30")
 )
 SOURCE_RECOVERY_MAX_MESSAGES = int(
     os.getenv("TELEGRAM_SOURCE_RECOVERY_MAX_MESSAGES", "500")
