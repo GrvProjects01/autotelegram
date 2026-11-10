@@ -13,6 +13,14 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/autotelegram/autotelegram
 EnvironmentFile=/home/ubuntu/autotelegram/autotelegram/.env
 EnvironmentFile=/home/ubuntu/autotelegram/autotelegram/sessions/%i.env
+# Limites de polling para evitar consumo excessivo de Vercel/Supabase.
+# Declarados depois dos EnvironmentFile para prevalecer sobre valores legados.
+Environment=TELEGRAM_AUTOMATIONS_CACHE_TTL=60
+Environment=TELEGRAM_RECURRING_POLL_SECONDS=60
+Environment=TELEGRAM_IMPORT_POLL_SECONDS=30
+Environment=TELEGRAM_IMPORT_MAX_IDLE_POLL_SECONDS=120
+Environment=TELEGRAM_HEARTBEAT_INTERVAL=120
+Environment=TELEGRAM_SOURCE_RECOVERY_INTERVAL=30
 ExecStart=/home/ubuntu/autotelegram/autotelegram/venv/bin/python /home/ubuntu/autotelegram/autotelegram/session_worker_history.py
 # Este processo e um daemon. Reinicia tanto em falha quanto em saida inesperada limpa.
 Restart=always
