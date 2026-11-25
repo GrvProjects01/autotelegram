@@ -59,6 +59,7 @@ run_as_deploy_user "$VENV_DIR/bin/python" -m py_compile \
   "$PROJECT_DIR/session_worker.py" \
   "$PROJECT_DIR/worker.py" \
   "$PROJECT_DIR/http_resilience_addon.py" \
+  "$PROJECT_DIR/pool_watchdog.py" \
   "$PROJECT_DIR/media_transport_hardening.py" \
   "$PROJECT_DIR/video_preview_addon.py" \
   "$PROJECT_DIR/recurring_messages_addon.py" \
@@ -80,6 +81,7 @@ if [[ -x "$VENV_DIR/bin/pytest" ]]; then
   [[ -f "$PROJECT_DIR/tests/test_recurring_rotation_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_recurring_rotation_addon.py")
   [[ -f "$PROJECT_DIR/tests/test_http_resilience_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_http_resilience_addon.py")
   [[ -f "$PROJECT_DIR/tests/test_media_transport_hardening.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_media_transport_hardening.py")
+  [[ -f "$PROJECT_DIR/tests/test_pool_watchdog.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_pool_watchdog.py")
   if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
     log "testando scheduler recorrente/importacao/preview/resiliencia HTTP"
     run_as_deploy_user "$VENV_DIR/bin/pytest" -q "${TEST_FILES[@]}"
