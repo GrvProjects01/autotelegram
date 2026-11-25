@@ -9,15 +9,22 @@ carrega o worker base. Nao altera contratos HTTP nem schema do Lovable.
 
 import asyncio
 import os
+import signal
+import sys
+import threading
 import time
 
 import httpx
+
+from pool_watchdog import PoolWatchdog
 
 
 _REGISTERED = False
 _PRIMARY_CLIENT = None
 _HEARTBEAT_CLIENT = None
 _AUTOMATIONS_LOCK = None
+_WATCHDOG = None
+_CLOSING_TASKS = set()
 
 
 def _env_int(name, default, minimum, maximum):
@@ -61,6 +68,63 @@ async def _get_client(*, heartbeat=False):
     if _PRIMARY_CLIENT is None or _PRIMARY_CLIENT.is_closed:
         _PRIMARY_CLIENT = _new_client(heartbeat=False)
     return _PRIMARY_CLIENT
+
+
+def _watchdog():
+    global _WATCHDOG
+    if _WATCHDOG is None:
+        _WATCHDOG = PoolWatchdog(
+            recycle_after=_env_int("TELEGRAM_POOL_RECYCLE_AFTER", 90, 30, 600),
+            exit_after=_env_int("TELEGRAM_POOL_EXIT_AFTER", 300, 120, 1800),
+        )
+    return _WATCHDOG
+
+
+async def _close_quietly(client):
+    try:
+        await asyncio.wait_for(client.aclose(), timeout=10)
+    except Exception:
+        pass
+
+
+def _recycle_primary_client():
+    """Troca o cliente na hora; o antigo e fechado em segundo plano."""
+    global _PRIMARY_CLIENT
+
+    old, _PRIMARY_CLIENT = _PRIMARY_CLIENT, None
+    if old is None:
+        return
+
+    task = asyncio.ensure_future(_close_quietly(old))
+    _CLOSING_TASKS.add(task)
+    task.add_done_callback(_CLOSING_TASKS.discard)
+
+
+def _restart_process():
+    """Encerra para o systemd reiniciar. Estado local e SQLite/troca atomica."""
+    sys.stdout.flush()
+    # Se o encerramento normal tambem travar, forca a saida.
+    fallback = threading.Timer(30, os._exit, args=(75,))
+    fallback.daemon = True
+    fallback.start()
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def _on_pool_timeout(session_key):
+    watchdog = _watchdog()
+    action = watchdog.record_pool_timeout()
+    if action is None:
+        return
+
+    summary = (
+        f"falhas={watchdog.failures} sem_resposta={watchdog.stalled_for():.0f}s"
+    )
+    if action == "recycle":
+        print(f"[Pool Watchdog:{session_key}] recriando cliente HTTP {summary}", flush=True)
+        _recycle_primary_client()
+    else:
+        print(f"[Pool Watchdog:{session_key}] pool continua travado; reiniciando {summary}", flush=True)
+        _restart_process()
 
 
 def _safe_to_retry(method, path, worker):
@@ -134,10 +198,18 @@ async def _resilient_request(worker, session_key, path, method="GET", data=None)
         max_attempts = 3 if safe_retry else 2
 
     for attempt in range(1, max_attempts + 1):
+        # O heartbeat usa outro pool: nao conta nem zera a deteccao de trava.
+        primary_pool = path != worker.HEARTBEAT_ENDPOINT
+
         try:
-            return await _perform_request(worker, path, method, data)
+            result = await _perform_request(worker, path, method, data)
+            if primary_pool:
+                _watchdog().record_response()
+            return result
 
         except httpx.HTTPStatusError as error:
+            if primary_pool:
+                _watchdog().record_response()
             status = int(error.response.status_code)
             retryable_status = (
                 safe_retry
@@ -154,6 +226,8 @@ async def _resilient_request(worker, session_key, path, method="GET", data=None)
                 raise
 
         except httpx.RequestError as error:
+            if primary_pool and isinstance(error, httpx.PoolTimeout):
+                _on_pool_timeout(session_key)
             can_retry = safe_retry or _request_was_not_sent(error)
             if not can_retry or attempt >= max_attempts:
                 print(
