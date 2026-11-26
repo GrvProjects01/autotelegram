@@ -60,6 +60,7 @@ run_as_deploy_user "$VENV_DIR/bin/python" -m py_compile \
   "$PROJECT_DIR/worker.py" \
   "$PROJECT_DIR/http_resilience_addon.py" \
   "$PROJECT_DIR/pool_watchdog.py" \
+  "$PROJECT_DIR/api_address.py" \
   "$PROJECT_DIR/media_transport_hardening.py" \
   "$PROJECT_DIR/video_preview_addon.py" \
   "$PROJECT_DIR/recurring_messages_addon.py" \
@@ -82,6 +83,7 @@ if [[ -x "$VENV_DIR/bin/pytest" ]]; then
   [[ -f "$PROJECT_DIR/tests/test_http_resilience_addon.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_http_resilience_addon.py")
   [[ -f "$PROJECT_DIR/tests/test_media_transport_hardening.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_media_transport_hardening.py")
   [[ -f "$PROJECT_DIR/tests/test_pool_watchdog.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_pool_watchdog.py")
+  [[ -f "$PROJECT_DIR/tests/test_api_address.py" ]] && TEST_FILES+=("$PROJECT_DIR/tests/test_api_address.py")
   if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
     log "testando scheduler recorrente/importacao/preview/resiliencia HTTP"
     run_as_deploy_user "$VENV_DIR/bin/pytest" -q "${TEST_FILES[@]}"
@@ -156,17 +158,22 @@ check_service telegram-worker@primary
 log "probe de cutover ROCFORT API v2"
 run_as_deploy_user "$VENV_DIR/bin/python" - <<'PY'
 from pathlib import Path
+import sys
 from dotenv import dotenv_values
 import httpx
 
 project = Path("/home/ubuntu/autotelegram/autotelegram")
+sys.path.insert(0, str(project))
+from api_address import resolve_api_url
+
 config = {}
 for env_path in [project / ".env", project / "sessions" / "primary.env"]:
     if env_path.exists():
         config.update({k: v for k, v in dotenv_values(env_path).items() if v is not None})
 
 secret = config.get("LOVABLE_WORKER_SECRET")
-url = "https://telegram-channel-automator-theta.vercel.app/api/public/worker/diagnostics"
+# Mesmo endereco que o robo usa.
+url = resolve_api_url(config.get("WORKER_API_URL")) + "/api/public/worker/diagnostics"
 
 if not secret:
     raise SystemExit("[Probe] LOVABLE_WORKER_SECRET ausente nos arquivos de ambiente")
