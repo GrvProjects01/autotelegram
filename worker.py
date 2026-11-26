@@ -22,6 +22,7 @@ from telethon.tl.types import (
 )
 
 from dotenv import load_dotenv
+from api_address import resolve_api_url
 from telegram_buttons import TelegramButtonPublisher
 
 
@@ -35,7 +36,8 @@ API_ID = int(os.environ["TELEGRAM_API_ID"])
 API_HASH = os.environ["TELEGRAM_API_HASH"]
 
 LOVABLE_API_URL = os.getenv("LOVABLE_API_URL", "").rstrip("/")
-WORKER_API_URL = "https://telegram-channel-automator-theta.vercel.app"
+WORKER_API_URL = resolve_api_url(os.getenv("WORKER_API_URL"))
+print(f"[Config] API do painel: {WORKER_API_URL}")
 WORKER_SECRET = os.environ["LOVABLE_WORKER_SECRET"]
 
 SESSION_NAME = os.getenv(
